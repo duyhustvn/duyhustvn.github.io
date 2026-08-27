@@ -1,0 +1,28 @@
+# -- Main Menu --
+# Menu hiển thị ở phần thanh điều hướng trên cùng
+
+[[main]]
+  name = "Bài viết"
+  pageRef = "posts"
+  weight = 10
+
+[[main]]
+  name = "Chuyên mục"
+  pageRef = "categories"
+  weight = 20
+
+[[main]]
+  name = "Thẻ"
+  pageRef = "tags"
+  weight = 30
+
+# -- Footer Menu --
+# [[footer]]
+#   name = "Thẻ"
+#   pageRef = "tags"
+#   weight = 10
+
+# [[footer]]
+#   name = "Chuyên mục"
+#   pageRef = "categories"
+#   weight = 20

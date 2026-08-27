@@ -1,0 +1,26 @@
+disabled = false
+locale = "vi"
+label = "Tiếng Việt"
+weight = 1
+title = "Blog Cá Nhân"
+
+[params]
+  displayName = "VI"
+  isoCode = "vi"
+  rtl = false
+  dateFormat = "02/01/2006"
+  # logo = "img/logo.png"
+  # secondaryLogo = "img/secondary-logo.png"
+  description = "Trang blog cá nhân chia sẻ kiến thức và trải nghiệm"
+  copyright = "Bản quyền © 2026"
+
+[params.author]
+  name = "DUY"
+  # email = "youremail@example.com"
+  # image = "img/author.png"
+  headline = "Developer"
+  bio = "Chào mừng bạn đến với blog của tôi!"
+  # links = [
+  #   { github = "https://github.com/" },
+  #   { facebook = "https://facebook.com/" },
+  # ]
