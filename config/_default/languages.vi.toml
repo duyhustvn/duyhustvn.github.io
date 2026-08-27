@@ -2,7 +2,7 @@ disabled = false
 locale = "vi"
 label = "Tiếng Việt"
 weight = 1
-title = "Blog Cá Nhân"
+title = "Blog"
 
 [params]
   displayName = "VI"
@@ -12,13 +12,13 @@ title = "Blog Cá Nhân"
   # logo = "img/logo.png"
   # secondaryLogo = "img/secondary-logo.png"
   description = "Trang blog cá nhân chia sẻ kiến thức và trải nghiệm"
-  copyright = "Bản quyền © 2026"
+  copyright = ""
 
 [params.author]
-  name = "DUY"
+  name = "lee"
   # email = "youremail@example.com"
   # image = "img/author.png"
-  headline = "Developer"
+  headline = "Dev"
   bio = "Chào mừng bạn đến với blog của tôi!"
   # links = [
   #   { github = "https://github.com/" },

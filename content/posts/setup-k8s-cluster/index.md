@@ -576,10 +576,16 @@ systemctl disable rke2-server
 ```
 
 ### Bước 3: Xóa node khỏi cụm etcd và cluster
-Chạy lệnh này từ một Master node còn sống:
-```bash
-kubectl delete node <ten-node>
-```
+1. Xóa node khỏi Kubernetes:
+   ```bash
+   kubectl delete node <ten-node>
+   ```
+2. Dọn dẹp member khỏi etcd quorum (xem chi tiết ở **Phần V** bên dưới):
+   ```bash
+   /var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+     --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+     --endpoints=https://127.0.0.1:2379 member remove <member-id>
+   ```
 
 ### Bước 4: Sửa file cấu hình và khởi động `rke2-agent`
 1. Đảm bảo `/etc/rancher/rke2/config.yaml` đã có `server: https://192.168.1.10:9345`, `node-ip`, và `token`.
@@ -588,11 +594,130 @@ kubectl delete node <ten-node>
    systemctl enable --now rke2-agent
    ```
 
-### Bước 5: Mở khóa node (Uncordon)
+### Bước 5: Kiểm tra trạng thái Node mới trên cụm
+Sau khi `rke2-agent` khởi động, máy chủ sẽ tự động đăng ký lại vào cụm dưới danh nghĩa một Worker node hoàn toàn mới (mặc định ở trạng thái `Ready` và sẵn sàng nhận Pod mà **không cần chạy `uncordon`**):
+
 ```bash
-kubectl uncordon <ten-node>
-kubectl get nodes
+kubectl get nodes -o wide
 ```
+
+Kết quả mong đợi: Node cũ đã chuyển role từ `control-plane,etcd,master` sang `<none>` (Worker) và sẵn sàng chạy workload bình thường.
+
+---
+
+## V. Hướng dẫn thao tác và quản trị cụm etcd (etcdctl & crictl)
+
+Trong cụm RKE2 HA, `etcd` chạy trong container do containerd quản lý. Chúng ta sử dụng công cụ `crictl` kết hợp với chứng chỉ TLS để thao tác với `etcdctl`:
+
+### 1. Thiết lập môi trường tương tác với etcd
+
+Trước khi thực hiện các thao tác quản trị, bạn cần thực hiện 2 bước chuẩn bị biến môi trường trên node Master:
+
+#### Bước 1.1: Cấu hình endpoint cho `crictl`
+Tạo file `/etc/crictl.yaml` để `crictl` kết nối tới containerd socket nội bộ của RKE2:
+
+```bash
+cat << 'EOF' > /etc/crictl.yaml
+runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
+image-endpoint: unix:///run/k3s/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+```
+
+#### Bước 1.2: Lấy Container ID etcd và nạp biến chứng chỉ TLS
+Chạy các lệnh sau trong terminal để tự động lấy ID container etcd và nạp chứng chỉ:
+
+```bash
+# 1. Khai báo file cấu hình CRI
+export CRI_CONFIG_FILE="/etc/crictl.yaml"
+
+# 2. Lấy ID của Container etcd đang chạy
+ETCD_POD_ID=$(/var/lib/rancher/rke2/bin/crictl pods --label component=etcd -q)
+ETCD_CONTAINER_ID=$(/var/lib/rancher/rke2/bin/crictl ps --pod $ETCD_POD_ID -q)
+
+# 3. Khai báo đường dẫn chứng chỉ TLS của etcd
+export ETCD_CERT="/var/lib/rancher/rke2/server/tls/etcd/server-client.crt"
+export ETCD_KEY="/var/lib/rancher/rke2/server/tls/etcd/server-client.key"
+export ETCD_CACERT="/var/lib/rancher/rke2/server/tls/etcd/server-ca.crt"
+```
+
+---
+
+### 2. Các thao tác quản trị etcd thường dùng
+
+Sau khi đã nạp các biến ở trên, bạn có thể thực hiện tất cả các tác vụ quản trị etcd quan trọng sau:
+
+#### 🔹 Thao tác 1: Kiểm tra danh sách thành viên (Member List)
+Hiển thị danh sách tất cả các node Master tham gia cụm etcd cùng trạng thái ID của từng node:
+```bash
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 member list -w table
+```
+
+#### 🔹 Thao tác 2: Kiểm tra sức khỏe toàn bộ cụm (Endpoint Health)
+Kiểm tra xem tất cả các node etcd có đang phản hồi và hoạt động bình thường không:
+```bash
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 endpoint health --cluster
+```
+
+#### 🔹 Thao tác 3: Kiểm tra trạng thái chi tiết, dung lượng DB & Node Leader (Endpoint Status)
+Xem chi tiết node nào đang là **Leader**, term hiện tại và **dung lượng database (`DB SIZE`)** trên từng node:
+```bash
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 endpoint status --cluster -w table
+```
+
+#### 🔹 Thao tác 4: Kiểm tra và xóa cảnh báo lỗi (Check & Disarm Alarms)
+Khi etcd gặp lỗi (như hết dung lượng đĩa `NOSPACE` hoặc dữ liệu bị lỗi `CORRUPT`), etcd sẽ bật cờ báo động và chuyển sang chế độ Read-Only:
+```bash
+# Kiểm tra danh sách cảnh báo hiện có:
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 alarm list
+
+# Xóa cảnh báo (sau khi đã dọn dẹp dung lượng đĩa/sự cố):
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 alarm disarm
+```
+
+#### 🔹 Thao tác 5: Chống phân mảnh dữ liệu etcd (Defragmentation)
+Khi có nhiều tài nguyên Kubernetes bị xóa (Pods, ConfigMaps, Secrets,...), etcd sẽ để lại các khoảng trống phân mảnh. Chạy lệnh chống phân mảnh để thu hồi dung lượng đĩa thực tế và tăng tốc độ đọc/ghi:
+```bash
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 defrag --cluster
+```
+
+#### 🔹 Thao tác 6: Sao lưu dữ liệu etcd thủ công (Manual Snapshot)
+Tạo bản snapshot dữ liệu etcd tức thời để lưu trữ phòng ngừa sự cố:
+
+- **Cách 1: Sử dụng lệnh tích hợp sẵn của RKE2 (Khuyên dùng):**
+  ```bash
+  rke2 etcd-snapshot save --name manual-backup-$(date +%Y%m%d)
+  ```
+  *(File snapshot sẽ được lưu tự động tại `/var/lib/rancher/rke2/server/db/snapshots/`)*
+
+- **Cách 2: Sử dụng `etcdctl` bên trong container:**
+  ```bash
+  /var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+    --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+    --endpoints=https://127.0.0.1:2379 snapshot save /var/lib/rancher/rke2/server/db/snapshots/snapshot-manual.db
+  ```
+
+#### 🔹 Thao tác 7: Xóa thành viên khỏi cụm etcd (Member Remove)
+Khi bạn muốn hạ cấp một Master node thành Worker node hoặc thay thế một node Master bị hỏng vĩnh viễn, bạn cần xóa ID của node đó khỏi danh sách etcd member:
+```bash
+/var/lib/rancher/rke2/bin/crictl exec -it $ETCD_CONTAINER_ID etcdctl \
+  --cert=$ETCD_CERT --key=$ETCD_KEY --cacert=$ETCD_CACERT \
+  --endpoints=https://127.0.0.1:2379 member remove <member-id>
+```
+> ⚠️ **Lưu ý:** `<member-id>` được lấy từ cột **ID** của bảng kết quả khi chạy lệnh `member list` (Thao tác 1).
 
 ---
 
@@ -601,4 +726,5 @@ kubectl get nodes
 Mô hình **3 Master Nodes kết hợp Keepalived VIP** là kiến trúc chuẩn cho Kubernetes Production:
 1. **Khả năng chịu lỗi cao:** Cụm etcd 3 node duy trì quorum an toàn nếu 1 node chết; Keepalived chuyển đổi VIP tức thì sang Master khả dụng.
 2. **Linh hoạt triển khai:** Áp dụng đồng nhất cho cả môi trường Online tốc độ cao và môi trường Air-gap cách ly nghiêm ngặt.
-3. **Quản trị dễ dàng:** Mọi thao tác `kubectl` và kết nối Worker đều đi qua một đầu mối VIP duy nhất.
+3. **Quản trị dễ dàng:** Mọi thao tác `kubectl` và kết nối Worker đều đi qua một đầu mối VIP duy nhất, đồng thời dễ dàng giám sát và bảo trì etcd qua `crictl`/`etcdctl`.
+
