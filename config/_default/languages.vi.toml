@@ -11,7 +11,7 @@ title = "Blog"
   dateFormat = "02/01/2006"
   # logo = "img/logo.png"
   # secondaryLogo = "img/secondary-logo.png"
-  description = "Trang blog cá nhân chia sẻ kiến thức và trải nghiệm"
+  description = "Trang blog cá nhân chia sẻ kiến thức và kinh nghiệm"
   copyright = ""
 
 [params.author]
