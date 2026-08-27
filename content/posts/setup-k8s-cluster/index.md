@@ -28,6 +28,64 @@ Bài viết này sẽ hướng dẫn bạn chi tiết từng bước xây dựng
 | **Worker Node 1** | `node-worker-01` | `192.168.1.21` | Agent 1 (Chạy workload ứng dụng) |
 | **Worker Node 2** | `node-worker-02` | `192.168.1.22` | Agent 2 (Chạy workload ứng dụng) |
 
+{{< mermaid >}}
+flowchart TB
+    subgraph Clients["🖥️ Quản trị & CI/CD"]
+        Admin["Admin / kubectl"]
+        DevOps["CI/CD Pipeline"]
+    end
+
+    subgraph VIP_Layer["🛡️ Lớp Virtual IP (Keepalived VRRP)"]
+        VIP["<b>Virtual IP (VIP): 192.168.1.10</b><br/>Port 6443 (API Server) & 9345 (Supervisor)"]
+    end
+
+    subgraph Control_Plane["☸️ Kubernetes Control Plane (3 Master Nodes HA)"]
+        subgraph Master1["Master 1 (192.168.1.11)"]
+            K1["Keepalived (MASTER - Priority 101)"]
+            S1["RKE2 Server (API Server)"]
+            E1[("etcd member 1")]
+        end
+
+        subgraph Master2["Master 2 (192.168.1.12)"]
+            K2["Keepalived (BACKUP - Priority 100)"]
+            S2["RKE2 Server (API Server)"]
+            E2[("etcd member 2")]
+        end
+
+        subgraph Master3["Master 3 (192.168.1.13)"]
+            K3["Keepalived (BACKUP - Priority 99)"]
+            S3["RKE2 Server (API Server)"]
+            E3[("etcd member 3")]
+        end
+    end
+
+    subgraph Worker_Nodes["⚙️ Worker Nodes (Chạy Workload)"]
+        subgraph Worker1["Worker 1 (192.168.1.21)"]
+            W1["RKE2 Agent"]
+            P1["Container Pods"]
+        end
+
+        subgraph Worker2["Worker 2 (192.168.1.22)"]
+            W2["RKE2 Agent"]
+            P2["Container Pods"]
+        end
+    end
+
+    Admin -->|Quản lý qua VIP| VIP
+    DevOps -->|Deploy qua VIP| VIP
+
+    VIP -.->|Active| Master1
+    VIP -.->|Failover| Master2
+    VIP -.->|Failover| Master3
+
+    E1 <===>|Đồng bộ Quorum etcd| E2
+    E2 <===>|Đồng bộ Quorum etcd| E3
+    E3 <===>|Đồng bộ Quorum etcd| E1
+
+    Worker1 -->|Kết nối qua VIP:9345| VIP
+    Worker2 -->|Kết nối qua VIP:9345| VIP
+{{< /mermaid >}}
+
 > 📌 **Tài liệu tham khảo chính thức:**
 > - [Yêu cầu hệ thống RKE2 (RKE2 Requirements)](https://docs.rke2.io/install/requirements)
 > - [RKE2 High Availability Architecture](https://docs.rke2.io/install/ha)
