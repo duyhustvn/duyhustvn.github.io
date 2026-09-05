@@ -1,0 +1,24 @@
+/* Tối ưu hóa kích thước và độ rõ nét cho các biểu đồ Mermaid trong toàn bộ blog */
+.mermaid {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow-x: auto;
+  margin: 2rem 0;
+  padding: 1rem 0;
+}
+
+.mermaid svg {
+  min-width: 320px;
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+/* Đảm bảo chữ trong các hộp node và nhãn mũi tên luôn sắc nét, cỡ chữ to rõ ràng */
+.mermaid .nodeLabel,
+.mermaid .edgeLabel,
+.mermaid .label,
+.mermaid .cluster-label {
+  font-size: 15px !important;
+  font-weight: 500 !important;
+}
