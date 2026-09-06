@@ -1,10 +1,10 @@
 ---
-title: "Giải mã toàn diện vòng đời và 11 trạng thái kết nối TCP (TCP Connection States) từ lý thuyết đến thực chiến"
+title: "Giải mã toàn diện vòng đời và 11 trạng thái kết nối TCP (TCP Connection States) từ lý thuyết đến thực nghiệm"
 date: 2026-09-05T14:30:00+07:00
 draft: false
-description: "Hướng dẫn chi tiết, dễ hiểu về toàn bộ 11 trạng thái kết nối TCP trong Linux: Bắt tay 3 bước (3-Way Handshake), quá trình đóng kết nối (4-Way Teardown), cơ chế chuyên sâu của TIME-WAIT, CLOSE-WAIT, FIN-WAIT, SYN-SENT và cách khắc phục lỗi rò rỉ socket trên Production."
-summary: "Nắm trọn vẹn cỗ máy trạng thái TCP (TCP State Machine): Bản chất bắt tay 3 bước và 4 bước đóng kết nối, phân biệt vai trò Bên chủ động vs Bên bị động đóng kết nối, giải mã tại sao kẹt CLOSE-WAIT hay bùng nổ TIME-WAIT kèm cẩm nang chẩn đoán Production."
-tags: ["TCP/IP", "Networking", "Linux", "DevOps", "Troubleshooting", "System-Design", "SRE", "Performance"]
+description: "Hướng dẫn chi tiết, dễ hiểu về toàn bộ 11 trạng thái kết nối TCP trong Linux kèm chương trình thực nghiệm Python và lệnh ss: Bắt tay 3 bước, quá trình đóng 4 bước, cơ chế chuyên sâu của TIME-WAIT, CLOSE-WAIT, FIN-WAIT, SYN-SENT và giải mã bí mật Recv-Q/Send-Q."
+summary: "Nắm trọn vẹn cỗ máy trạng thái TCP (TCP State Machine) qua lăng kính thực nghiệm Python & lệnh ss: Bắt tay 3 bước, 4 bước đóng kết nối, phân biệt Bên chủ động vs Bên bị động, giải mã kẹt CLOSE-WAIT hay bùng nổ TIME-WAIT kèm cẩm nang chẩn đoán Production."
+tags: ["TCP/IP", "Networking", "Linux", "DevOps", "Troubleshooting", "System-Design", "SRE", "Performance", "Python", "Hands-on"]
 categories: ["Networking & DevOps", "Linux", "Deep Dive"]
 showTableOfContents: true
 ---
@@ -24,8 +24,16 @@ Rất nhiều kỹ sư cảm thấy bối rối:
 - Tại sao **`TIME-WAIT`** lại tồn tại tới 60 giây sau khi đóng kết nối, và nó sinh ra để làm gì?
 - Tại sao khi client gọi `close()` thì phía server lại chuyển sang `CLOSE-WAIT` chứ không phải `TIME-WAIT`?
 - Bên nào (Client hay Server) là người quyết định việc socket rơi vào `TIME-WAIT`?
+- Các chỉ số **`Recv-Q`** và **`Send-Q`** trong lệnh `ss` thực sự mang ý nghĩa gì khi ở `LISTEN` so với `ESTABLISHED`?
 
-Bài viết này sẽ giúp bạn **giải mã trọn vẹn Cỗ máy trạng thái TCP (TCP Finite State Machine)** theo chuẩn RFC 793, từ nguyên lý bắt tay 3 bước, 4 bước đóng kết nối đến các tình huống thực chiến khắc phục sự cố mạng trên môi trường Production.
+Bài viết này sẽ giúp bạn **giải mã trọn vẹn Cỗ máy trạng thái TCP (TCP Finite State Machine)** theo chuẩn RFC 793, từ nguyên lý lý thuyết đến **các kịch bản kiểm chứng thực nghiệm trực tiếp bằng Python và lệnh `ss` trên Linux**.
+
+> 🔬 **Góc thực nghiệm (TCP State Lab):**
+> Bài viết đi kèm bộ mã nguồn Python thực nghiệm độc lập (không cần quyền `root`/`sudo`). Bạn có thể vừa đọc bài vừa tự tay chạy các kịch bản kiểm chứng trên máy tính của mình:
+> - Tải file mã nguồn: [`labs/tcp_state_lab.py`](https://github.com/duyhustvn/duyhustvn.github.io/blob/master/labs/tcp_state_lab.py)
+> - Chạy kiểm chứng toàn bộ: `python3 labs/tcp_state_lab.py --all`
+> - Chạy menu tương tác: `python3 labs/tcp_state_lab.py`
+> - Chế độ tạm dừng từng bước để tự mở terminal khác gõ lệnh: `python3 labs/tcp_state_lab.py --lab 3 -p`
 
 ---
 
@@ -82,6 +90,47 @@ sequenceDiagram
 4. **Client nhận `SYN-ACK` → Chuyển sang `ESTABLISHED`:** Client nhận được phản hồi, ghi nhận ISN của Server, chuyển trạng thái socket sang `ESTABLISHED` và phản hồi lại gói `ACK` xác nhận.
 5. **Server nhận `ACK` → Chuyển sang `ESTABLISHED`:** Server nhận gói `ACK` cuối cùng, chuyển kết nối từ SYN Queue sang **Accept Queue** (Complete Connection Queue), socket chuyển sang trạng thái `ESTABLISHED`. Khi ứng dụng server gọi hàm `accept()`, kết nối này sẽ được trao cho một File Descriptor mới để ứng dụng bắt đầu đọc/ghi dữ liệu.
 
+### 🧪 Thực nghiệm 1: Bắt tay 3 bước & Bí mật Recv-Q / Send-Q của LISTEN socket
+
+Rất nhiều tài liệu mạng giải thích rằng `Recv-Q` và `Send-Q` đại diện cho số byte dữ liệu trong bộ đệm. **Điều đó chỉ đúng với kết nối đã thành lập (ESTABLISHED)!** Khi socket ở trạng thái `LISTEN`, Linux Kernel định nghĩa lại hoàn toàn hai cột này:
+
+Hãy cùng kiểm chứng bằng kịch bản sau:
+1. Server mở cổng lắng nghe với `listen(backlog=5)`.
+2. 3 Client kết nối tới Server thành công.
+3. **Ứng dụng Server cố tình CHƯA gọi hàm `accept()`** để đón nhận kết nối.
+
+```python
+# Trích đoạn từ labs/tcp_state_lab.py (Lab 1)
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.bind(("127.0.0.1", 0))
+port = srv.getsockname()[1]
+srv.listen(5)  # Backlog = 5
+
+# 3 client gọi connect() tới, Server chưa accept()
+clients = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(3)]
+for c in clients:
+    c.connect(("127.0.0.1", port))
+```
+
+Chạy lệnh kiểm tra socket bằng `ss -tan`:
+```bash
+ss -tan 'sport = :<port> or dport = :<port>'
+```
+
+**Kết quả thực nghiệm thực tế trên Linux:**
+```text
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port 
+LISTEN 3      5          127.0.0.1:53047      0.0.0.0:*    
+ESTAB  0      0          127.0.0.1:53047    127.0.0.1:47506
+ESTAB  0      0          127.0.0.1:53047    127.0.0.1:47518
+ESTAB  0      0          127.0.0.1:53047    127.0.0.1:47526
+```
+
+> 💡 **Phát hiện quan trọng từ thực nghiệm:**
+> 1. **`Send-Q = 5`**: Đối với socket `LISTEN`, `Send-Q` chính là kích thước hàng đợi kết nối tối đa (tham số `backlog` truyền vào hàm `listen()`).
+> 2. **`Recv-Q = 3`**: Không phải byte dữ liệu! Đây là **số lượng kết nối TCP đã hoàn tất bắt tay 3 bước thành công và đang nằm trong Accept Queue (Hàng đợi chấp nhận)** chờ ứng dụng gọi hàm `accept()`.
+> 3. Cả 3 client đều đã hiển thị trạng thái `ESTAB`. Điều này chứng minh quá trình bắt tay 3 bước do chính **Linux Kernel** xử lý độc lập, ứng dụng chưa cần gọi `accept()` thì kết nối TCP ở tầng mạng đã thiết lập xong!
+
 ### ⚠️ Các sự cố thường gặp trong giai đoạn bắt tay:
 - **Kẹt ở `SYN-SENT`:** 
   - *Hiện tượng:* Client chạy lệnh `ss -tan state syn-sent` thấy nhiều socket tích tụ.
@@ -102,6 +151,38 @@ Khi cả hai bên đều ở trạng thái **`ESTABLISHED`**, kênh truyền th�
 - Mỗi bên vừa có thể gửi dữ liệu (thông qua Send Buffer), vừa có thể nhận dữ liệu (thông qua Receive Buffer).
 - Mọi gói tin dữ liệu (`PSH`, `ACK`) đều mang số Sequence và Acknowledgement để đảm bảo không bị mất mát hay đảo lộn thứ tự.
 - Nếu một bên bị mất gói, cơ chế TCP Retransmission (Fast Retransmit hoặc RTO Timeout) sẽ kích hoạt để gửi lại dữ liệu.
+
+### 🧪 Thực nghiệm 2: Giai đoạn ESTABLISHED và sự biến hóa của Recv-Q / Send-Q
+
+Khi kết nối bước vào giai đoạn `ESTABLISHED`, ý nghĩa của hai cột queue trong lệnh `ss` lập tức biến đổi:
+- **`Recv-Q`**: Số byte dữ liệu đã đến kernel nhưng ứng dụng **chưa gọi `recv()` / `read()`** để lấy ra.
+- **`Send-Q`**: Số byte dữ liệu ứng dụng đã gửi bằng `send()`, nhưng **chưa nhận được ACK** từ phía đối phương.
+
+Hãy kiểm chứng: Server gửi 16,384 bytes (16KB) sang Client, nhưng Client **cố tình chưa đọc**:
+```python
+# Trích đoạn từ labs/tcp_state_lab.py (Lab 2)
+payload = b"X" * 16384  # 16 KB dữ liệu
+conn.sendall(payload)   # Server gửi dữ liệu sang
+# Phía Client chưa gọi client.recv()...
+```
+
+Chạy lệnh kiểm tra bằng `ss -tan`:
+```bash
+ss -tan 'sport = :<port> or dport = :<port>'
+```
+
+**Kết quả thực nghiệm thực tế:**
+```text
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port 
+LISTEN 0      1          127.0.0.1:40473      0.0.0.0:*    
+ESTAB  0      0          127.0.0.1:40473    127.0.0.1:41648
+ESTAB  16384  0          127.0.0.1:41648    127.0.0.1:40473
+```
+
+> 💡 **Quan sát thực tế:**
+> - Tại socket phía Client (`127.0.0.1:41648`): Cột **`Recv-Q = 16384`**. Toàn bộ 16KB đang được giữ an toàn trong TCP Receive Buffer của hệ điều hành.
+> - Tại socket phía Server: **`Send-Q = 0`**, chứng tỏ gói tin đã được truyền an toàn qua card mạng và phía Client đã tự động gửi gói `ACK` xác nhận cho Server.
+> - Ngay khi Client gọi `client.recv(16384)`, `Recv-Q` lập tức tụt về `0`.
 
 ---
 
@@ -192,6 +273,63 @@ sequenceDiagram
     ```
   - Mọi request mới đi vào server đều bị từ chối ngay lập tức, dịch vụ tê liệt hoàn toàn!
 
+### 🧪 Thực nghiệm 3: Bản chất TCP Half-Closed (FIN-WAIT-2) và Rò rỉ Socket (CLOSE-WAIT Leak)
+
+Một trong những câu hỏi phổ biến nhất: **Tại sao một bên đóng mà bên kia vẫn gửi được dữ liệu?** Và **tại sao `CLOSE-WAIT` lại nguy hiểm đến vậy?**
+
+Hãy xem thực nghiệm thực tế bằng Python:
+1. Client đóng chiều gửi của mình bằng `client.shutdown(socket.SHUT_WR)` (Active Closer).
+2. Server nhận được EOF (`conn.recv() == b""`), kernel tự động ACK, nhưng **code ứng dụng Server cố tình KHÔNG gọi `conn.close()`**.
+
+```python
+# Trích đoạn từ labs/tcp_state_lab.py (Lab 3)
+client.shutdown(socket.SHUT_WR)  # Client đóng chiều gửi (Active Closer)
+time.sleep(0.1)
+
+# Server nhận được tín hiệu EOF, nhưng CHƯA gọi conn.close()
+```
+
+Chạy lệnh kiểm tra bằng `ss -tanp`:
+```bash
+ss -tanp 'sport = :<port> or dport = :<port>'
+```
+
+**Kết quả thực nghiệm thực tế trên Linux:**
+```text
+State      Recv-Q Send-Q Local Address:Port  Peer Address:Port Process                            
+LISTEN     0      5          127.0.0.1:39359      0.0.0.0:*     users:(("python3",pid=45109,fd=4))
+FIN-WAIT-2 0      0          127.0.0.1:50278    127.0.0.1:39359 users:(("python3",pid=45109,fd=5))
+CLOSE-WAIT 1      0          127.0.0.1:39359    127.0.0.1:50278 users:(("python3",pid=45109,fd=7))
+```
+
+> 💡 **Quan sát thực nghiệm:**
+> - Phía Client chuyển sang **`FIN-WAIT-2`**: Chiều gửi đã đóng, nhưng chiều nhận vẫn mở.
+> - Phía Server chuyển sang **`CLOSE-WAIT`**: Chú ý cột **`Recv-Q = 1`**! Con số `1` này ở `CLOSE-WAIT` biểu thị cờ kết thúc file (EOF) đang nằm trong receive queue chờ ứng dụng tiêu thụ.
+
+#### Kiểm chứng tính chất Half-Closed:
+Liệu Server ở `CLOSE-WAIT` có thể tiếp tục gửi dữ liệu sang Client ở `FIN-WAIT-2`?
+```python
+# Server gửi thêm dữ liệu khi đang ở CLOSE-WAIT:
+conn.sendall(b"Server: Toi van con du lieu muon gui cho ban truoc khi dong!\n")
+msg = client.recv(1024)
+print(msg.decode())
+# Kết quả: Client in FIN-WAIT-2 nhận thành công 100%!
+```
+➔ Điều này chứng minh hoàn hảo nguyên lý **TCP Half-Closed**: Chiều gửi của bên này tắt không ảnh hưởng gì tới chiều gửi của bên kia!
+
+#### Mô phỏng rò rỉ Socket Leak trên Production:
+Điều gì xảy ra nếu server có lỗi logic (exception) và bỏ quên không gọi `close()` cho các client ngắt kết nối?
+Khi 4 client kết nối và ngắt, lệnh `ss -tanp state close-wait` lập tức phơi bày "thủ phạm":
+
+```text
+Recv-Q Send-Q Local Address:Port  Peer Address:Port Process                             
+1      0          127.0.0.1:35463    127.0.0.1:56624 users:(("python3",pid=45725,fd=11))
+1      0          127.0.0.1:35463    127.0.0.1:56622 users:(("python3",pid=45725,fd=10))
+1      0          127.0.0.1:35463    127.0.0.1:56610 users:(("python3",pid=45725,fd=9)) 
+1      0          127.0.0.1:35463    127.0.0.1:56598 users:(("python3",pid=45725,fd=7))
+```
+Mỗi kết nối `CLOSE-WAIT` đang chiếm giữ một **File Descriptor (`fd=7, 9, 10, 11`)** của hệ điều hành. Các socket này **sẽ tồn tại vĩnh viễn** cho đến khi tiến trình bị tắt, làm cạn kiệt bảng descriptor của hệ thống!
+
 ---
 
 ### 4. `LAST-ACK` (Bên bị động đóng)
@@ -236,6 +374,61 @@ flowchart TD
 - Khi một server đóng vai trò là Client (ví dụ: Microservice gọi API khác, hoặc Web App gọi Database/Redis) tạo kết nối HTTP liên tục mà **không bật Keep-Alive**.
 - Mỗi request mở 1 socket, gọi xong đóng ngay → Server là bên chủ động đóng → Socket rơi vào `TIME-WAIT` trong 60 giây.
 - Với 1.000 request/s, trong 60 giây sẽ có **60.000 socket `TIME-WAIT`**, nuốt trọn toàn bộ dải ephemeral ports nội bộ của máy chủ. Kết quả: lỗi `Cannot assign requested address`.
+
+### 🧪 Thực nghiệm 4: Theo dõi bộ đếm 2MSL (60s Countdown Timer) bằng cờ ss -tan -o
+
+Khi cả hai bên gọi `close()`, bên chủ động đóng sẽ bước vào trạng thái `TIME-WAIT`. Rất nhiều kỹ sư thắc mắc: *Làm sao biết Linux Kernel có thực sự đếm lùi 60 giây hay không?*
+
+Lệnh `ss` với cờ **`-o` (options/timers)** sẽ hiển thị trực tiếp bộ đếm thời gian thực này:
+
+```bash
+ss -tan -o 'sport = :<port> or dport = :<port>'
+```
+
+**Kết quả quan sát tại giây thứ 1:**
+```text
+State     Recv-Q Send-Q Local Address:Port  Peer Address:Port 
+LISTEN    0      1          127.0.0.1:35585      0.0.0.0:*    
+TIME-WAIT 0      0          127.0.0.1:34644    127.0.0.1:35585 timer:(timewait,59sec,0)
+```
+
+**Kết quả quan sát sau 3 giây:**
+```text
+State     Recv-Q Send-Q Local Address:Port  Peer Address:Port 
+LISTEN    0      1          127.0.0.1:35585      0.0.0.0:*    
+TIME-WAIT 0      0          127.0.0.1:34644    127.0.0.1:35585 timer:(timewait,56sec,0)
+```
+
+> 💡 **Phát hiện:** Linux Kernel duy trì một timer riêng biệt: `timer:(timewait,56sec,0)`. Khi giá trị này chạm `0`, socket sẽ được giải phóng hoàn toàn và biến mất khỏi bảng kết nối. Phía Passive Closer (Server) đã `CLOSED` ngay lập tức và **không hề có timer nào**!
+
+### 🧪 Thực nghiệm 5: Khi Server trở thành Active Closer (Ai sẽ chịu TIME-WAIT?)
+
+Có một ngộ nhận kinh điển trong cộng đồng lập trình: *"Chỉ có Client mới bị TIME-WAIT, Server không bao giờ bị!"*
+
+Thực tế: **Bên nào gọi hàm `close()` trước để phát gói `FIN` đầu tiên, bên đó sẽ là Active Closer và phải gánh chịu `TIME-WAIT`**.
+
+Hãy xem điều gì xảy ra nếu **Server chủ động đóng trước** (ví dụ Nginx ngắt kết nối do Client hết hạn Keep-Alive idle timeout):
+
+```python
+# Trích đoạn từ labs/tcp_state_lab.py (Lab 5)
+# Server chủ động đóng kết nối trước!
+conn.close()
+time.sleep(0.05)
+
+# Client sau đó mới đóng socket phía mình
+client.close()
+```
+
+Kiểm tra bằng `ss -tan -o`:
+```text
+State     Recv-Q Send-Q Local Address:Port  Peer Address:Port 
+LISTEN    0      1          127.0.0.1:45163      0.0.0.0:*    
+TIME-WAIT 0      0          127.0.0.1:45163    127.0.0.1:54754 timer:(timewait,59sec,0)
+```
+
+> 🚨 **Bài học thực chiến:**
+> - Nhìn vào cột `Local Address:Port`: Socket `TIME-WAIT` thuộc về **cổng của Server (`127.0.0.1:45163`)**!
+> - Đây là lý do tại sao các hệ thống API Gateway, Reverse Proxy (như Nginx, HAProxy) hoặc Microservices gọi sang dịch vụ khác nếu chủ động đóng kết nối liên tục thì chính **máy chủ đó sẽ bị tràn ngập socket TIME-WAIT**, dẫn đến cạn kiệt ephemeral ports hoặc file descriptors cục bộ.
 
 ---
 
@@ -288,15 +481,70 @@ Khi hệ thống gặp sự cố mạng, hãy mở terminal và chạy lệnh `s
 | **`FIN-WAIT-1` kẹt lâu** | Phía bên kia bị đứt kết nối mạng hoặc sập nguồn đột ngột, gói `FIN` gửi đi bị mất. | **Bên chủ động đóng** | `ss -tan state fin-wait-1` | Tinh chỉnh số lần retry gói mồ côi: `sysctl -w net.ipv4.tcp_orphan_retries=2`. |
 | **`FIN-WAIT-2` kẹt nhiều** | Đối phương nhận được FIN của ta nhưng phía họ bị treo, không bao giờ gửi lại FIN. | **Bên chủ động đóng** | `ss -tan state fin-wait-2` | Kiểm tra tham số timeout: `sysctl -w net.ipv4.tcp_fin_timeout=30`. |
 
+### 🧪 Thực nghiệm 6: Mô phỏng kẹt SYN-SENT khi gói tin bị DROP (Firewall Blackhole)
+
+Khi gặp lỗi kết nối mạng, làm sao để phân biệt giữa:
+1. **Port đang bị đóng (Service Down):** Phía đích sẽ phản hồi ngay lập tức gói tin TCP `RST` (Reset). Hàm `connect()` ném lỗi `ConnectionRefusedError` chỉ trong vài mili-giây, socket **hoàn toàn không bị kẹt ở `SYN-SENT`**.
+2. **Firewall âm thầm DROP gói tin (Blackhole):** Gói `SYN` gửi đi và biến mất vào hư vô. Không có gói `RST` hay `SYN-ACK` nào trả về!
+
+Hãy kiểm chứng bằng cách kết nối non-blocking tới địa chỉ RFC 5737 TEST-NET (`192.0.2.1:80`) — dải IP chuẩn không bao giờ phản hồi gói tin:
+
+```python
+# Trích đoạn từ labs/tcp_state_lab.py (Lab 6)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setblocking(False)
+try:
+    s.connect(("192.0.2.1", 80))
+except BlockingIOError:
+    pass  # Kết nối đang chờ xử lý ngầm
+```
+
+Kiểm tra ngay bằng lệnh `ss -tan`:
+```bash
+ss -tan dst 192.0.2.1
+```
+
+**Kết quả thực nghiệm thực tế:**
+```text
+State    Recv-Q Send-Q Local Address:Port  Peer Address:Port
+SYN-SENT 0      1       192.168.1.35:55566    192.0.2.1:80
+```
+
+> 💡 **Bóc tách cốt lõi:**
+> - Socket rơi vào trạng thái **`SYN-SENT`**.
+> - Cột **`Send-Q = 1`**: Đại diện cho 1 gói tin `SYN` khởi tạo đang nằm trong hàng đợi gửi đi chờ xác nhận.
+> - Kernel sẽ tự động gửi lại gói `SYN` nhiều lần theo thuật toán lũy thừa (Exponential Backoff: 1s, 2s, 4s, 8s...) dựa theo tham số `net.ipv4.tcp_syn_retries` trước khi chịu từ bỏ và trả về lỗi `ETIMEDOUT` (Connection timed out) sau khoảng 60–120 giây.
+
 ---
 
-## 8. Lời kết
+## 8. Cẩm nang câu lệnh `ss` thực chiến (Socket Statistics Cheat Sheet)
 
-Hiểu rõ 11 trạng thái kết nối TCP cùng bản chất cỗ máy trạng thái FSM là một trong những kỹ năng nền tảng quan trọng nhất phân biệt giữa một kỹ sư chỉ biết "khởi động lại service khi gặp lỗi" và một kỹ sư có khả năng "chẩn đoán và khắc phục sự cố tận gốc rễ".
+Lệnh `ss` là công cụ thay thế hiện đại, mạnh mẽ và nhanh hơn rất nhiều so với `netstat` vì nó truy vấn thông tin trực tiếp từ Kernel qua giao tiếp Netlink (`sock_diag`). Dưới đây là các cú pháp bạn sẽ dùng hàng ngày:
 
-Ghi nhớ 3 quy tắc vàng:
-1. **`CLOSE-WAIT` là lỗi của ứng dụng tại chỗ** (không gọi `close()`). Cần sửa code ngay!
-2. **`TIME-WAIT` là tính năng bảo vệ của TCP**, xuất hiện ở bên chủ động đóng trước. Nếu số lượng quá lớn, giải pháp là bật Connection Pooling và tái sử dụng socket!
-3. **`SYN-SENT` là dấu hiệu của mạng bị chặn** (Firewall drop hoặc routing sai).
+| Mục đích điều tra | Câu lệnh `ss` chuẩn | Giải thích cờ & cú pháp |
+| :--- | :--- | :--- |
+| **Xem tổng quan hệ thống** | `ss -s` | Thống kê số lượng socket tổng thể (TCP, UDP, RAW, TIME-WAIT...). |
+| **Xem tất cả kết nối TCP** | `ss -tan` | `-t` (TCP), `-a` (tất cả LISTEN + Non-LISTEN), `-n` (hiển thị số port/IP). |
+| **Xem kèm tiến trình & FD** | `sudo ss -tanp` | `-p` (process): Hiển thị tên tiến trình, PID và số File Descriptor (`fd=...`). |
+| **Xem đếm ngược timer** | `ss -tan -o` | `-o` (options/timers): Hiển thị bộ đếm `TIME-WAIT`, keepalive countdown. |
+| **Lọc theo trạng thái cụ thể** | `ss -tan state established`<br/>`ss -tan state close-wait`<br/>`ss -tan state time-wait` | Sử dụng từ khóa `state <tên_trạng_thái>` viết thường. |
+| **Lọc theo cổng cục bộ** | `ss -tan 'sport = :8080'` | Lọc cổng nguồn (Source Port). |
+| **Lọc theo cổng đích** | `ss -tan 'dport = :443'` | Lọc cổng đích (Destination Port). |
+| **Lọc theo IP đích** | `ss -tan dst 192.168.1.1` | Tìm toàn bộ socket đang hướng tới một máy chủ cụ thể. |
 
-Hy vọng bài viết này đã giúp bạn tự tin làm chủ mọi trạng thái socket trong hệ thống Linux của mình!
+---
+
+## 9. Lời kết
+
+Hiểu rõ 11 trạng thái kết nối TCP cùng bản chất cỗ máy trạng thái FSM qua lăng kính **thực nghiệm** là một trong những kỹ năng nền tảng quan trọng nhất phân biệt giữa một kỹ sư chỉ biết "khởi động lại service khi gặp lỗi" và một kỹ sư có khả năng "chẩn đoán và khắc phục sự cố mạng tận gốc rễ".
+
+Ghi nhớ 4 bài học thực nghiệm cốt lõi:
+1. **`Recv-Q` và `Send-Q` có 2 bộ mặt:** Ở trạng thái `LISTEN`, chúng là **Accept Queue** và **Backlog size**; ở trạng thái `ESTABLISHED`, chúng mới là **Byte dữ liệu chưa đọc / chưa ACK**.
+2. **`CLOSE-WAIT` là lỗi của tầng ứng dụng** (không gọi `close()` hoặc deadlock). Kernel Linux **không bao giờ tự động dọn dẹp** socket `CLOSE-WAIT`, dẫn tới cạn kiệt File Descriptor (`Too many open files`).
+3. **`TIME-WAIT` là cơ chế bảo vệ của TCP**, và nó xuất hiện ở **bất kỳ bên nào gọi `close()` trước** (kể cả Server). Muốn giảm bớt trên Server, bắt buộc phải bật Connection Pooling và HTTP Keep-Alive.
+4. **`SYN-SENT` tích tụ là dấu hiệu của mạng bị DROP gói tin** (Firewall / Security Group / Sai route), hoàn toàn khác với việc Port bị đóng (nhận ngay gói `RST`).
+
+Toàn bộ mã nguồn thực nghiệm trong bài viết đã được đóng gói sẵn trong script:  
+👉 [`labs/tcp_state_lab.py`](https://github.com/duyhustvn/duyhustvn.github.io/blob/master/labs/tcp_state_lab.py)
+
+Chúc bạn tự tin làm chủ và làm chủ hoàn toàn mọi trạng thái socket trong hệ thống Linux của mình!
