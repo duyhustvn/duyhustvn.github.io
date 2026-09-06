@@ -57,6 +57,16 @@ Chuẩn mạng RFC 793 định nghĩa chính xác **11 trạng thái** của m�
 | 10 | **`LAST-ACK`** | Phía bị động đóng đã hoàn tất công việc, gửi `FIN` của mình đi và chờ `ACK` cuối cùng để đóng hẳn. |
 | 11 | **`TIME-WAIT`** | Phía chủ động đóng gửi `ACK` cuối cùng và chờ trong khoảng thời gian `2 × MSL` (60s) trước khi giải phóng socket. |
 
+> 💡 **Góc chuyên sâu: Tại sao RFC 793 / RFC 9293 lại gọi CLOSED là "trạng thái hư cấu" (Fictional State)?**
+> 
+> Trong tài liệu đặc tả chuẩn của giao thức TCP do IETF ban hành (từ RFC 793 trang 21 đến chuẩn cập nhật RFC 9293 mục 3.3.2), các tác giả đã ghi rõ nguyên văn:
+> > *"**CLOSED is fictional** because it represents the state when there is no TCB, and therefore, no connection."*  
+> > *(TCB = Transmission Control Block — Khối cấu trúc dữ liệu quản lý kết nối trong Kernel).*
+> 
+> Hai lý do cốt lõi đằng sau khái niệm này:
+> 1. **Về mặt thực tế hệ thống (Linux Kernel):** Khi kết nối chưa tạo hoặc đã kết thúc, hệ điều hành **hoàn toàn không lưu trữ bất kỳ thông tin nào trong RAM** (không có `struct tcp_sock`, không tốn 1 byte bộ nhớ hay File Descriptor nào). Về mặt vật lý, nó **không tồn tại**. Đó là lý do vì sao khi bạn gõ `ss -tan` hoặc `netstat`, bạn sẽ **không bao giờ nhìn thấy socket nào hiển thị trạng thái `CLOSED`**!
+> 2. **Về mặt lý thuyết thiết kế (Finite State Machine):** Để mô hình hóa một cỗ máy trạng thái hoàn chỉnh, bắt buộc phải có một **điểm xuất phát (Initial State)** và một **điểm kết thúc (Terminal State)**. Do đó, các nhà thiết kế giao thức đã "quy ước / giả định" ra trạng thái mang tên `CLOSED` để làm mỏ neo vẽ các mũi tên chuyển dịch (`CLOSED` $\rightarrow$ `LISTEN`, `CLOSED` $\rightarrow$ `SYN-SENT` và `TIME-WAIT` $\rightarrow$ `CLOSED`).
+
 ---
 
 ## 2. Giai đoạn 1: Bắt tay 3 bước (TCP 3-Way Handshake - Khởi tạo)
