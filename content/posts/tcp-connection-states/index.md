@@ -65,7 +65,7 @@ Chuẩn mạng RFC 793 định nghĩa chính xác **11 trạng thái** của m�
 > 
 > Hai lý do cốt lõi đằng sau khái niệm này:
 > 1. **Về mặt thực tế hệ thống (Linux Kernel):** Khi kết nối chưa tạo hoặc đã kết thúc, hệ điều hành **hoàn toàn không lưu trữ bất kỳ thông tin nào trong RAM** (không có `struct tcp_sock`, không tốn 1 byte bộ nhớ hay File Descriptor nào). Về mặt vật lý, nó **không tồn tại**. Đó là lý do vì sao khi bạn gõ `ss -tan` hoặc `netstat`, bạn sẽ **không bao giờ nhìn thấy socket nào hiển thị trạng thái `CLOSED`**!
-> 2. **Về mặt lý thuyết thiết kế (Finite State Machine):** Để mô hình hóa một cỗ máy trạng thái hoàn chỉnh, bắt buộc phải có một **điểm xuất phát (Initial State)** và một **điểm kết thúc (Terminal State)**. Do đó, các nhà thiết kế giao thức đã "quy ước / giả định" ra trạng thái mang tên `CLOSED` để làm mỏ neo vẽ các mũi tên chuyển dịch (`CLOSED` $\rightarrow$ `LISTEN`, `CLOSED` $\rightarrow$ `SYN-SENT` và `TIME-WAIT` $\rightarrow$ `CLOSED`).
+> 2. **Về mặt lý thuyết thiết kế (Finite State Machine):** Để mô hình hóa một cỗ máy trạng thái hoàn chỉnh, bắt buộc phải có một **điểm xuất phát (Initial State)** và một **điểm kết thúc (Terminal State)**. Do đó, các nhà thiết kế giao thức đã "quy ước / giả định" ra trạng thái mang tên `CLOSED` để làm mỏ neo vẽ các mũi tên chuyển dịch (`CLOSED` → `LISTEN`, `CLOSED` → `SYN-SENT` và `TIME-WAIT` → `CLOSED`).
 
 ---
 
