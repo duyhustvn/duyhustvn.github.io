@@ -42,9 +42,9 @@ flowchart TB
 
     subgraph WorkerNode["⚙️ Worker Node Architecture"]
         subgraph NodeComponents["Thành phần nền tảng Node"]
-            Kubelet["<b>kubelet</b><br/>(Agent quản lý Node & Pod)"]
-            Proxy["<b>kube-proxy</b><br/>(Quản lý iptables / IPVS Service)"]
-            CRI["<b>Container Runtime</b><br/>(containerd / CRI-O)"]
+            Kubelet["kubelet<br/>(Agent quản trị Node & Pod)"]
+            KubeProxy["kube-proxy<br/>(Quản lý iptables / IPVS Service)"]
+            CRI["Container Runtime<br/>(containerd / CRI-O)"]
         end
 
         subgraph PodContainers["Không gian Workload"]
@@ -57,8 +57,8 @@ flowchart TB
         CRI --> P2
     end
 
-    API <==>|Giao tiếp HTTPS (Port 10250 / 6443)| Kubelet
-    Proxy -.->|Theo dõi Service & Endpoints| API
+    API <--->|Giao tiếp HTTPS Port 10250 / 6443| Kubelet
+    KubeProxy -.->|Theo dõi Service & Endpoints| API
 {{< /mermaid >}}
 
 ### 1.1. Giải phẫu kiến trúc bên trong một Worker Node
@@ -105,7 +105,7 @@ Trong một cụm K8s lớn, bạn có thể có hàng chục đến hàng trăm
 {{< mermaid >}}
 flowchart LR
     subgraph PodManifest["Pod Deployment"]
-        Pod["Pod: Payment-Database<br/><b>nodeSelector: disk-type=ssd</b>"]
+        Pod["Pod: Payment-Database<br/>nodeSelector: disk-type=ssd"]
     end
 
     subgraph Scheduler["kube-scheduler"]
@@ -114,12 +114,12 @@ flowchart LR
 
     subgraph Nodes["Cluster Nodes"]
         N1["worker-node-1<br/>disk-type=hdd"]
-        N2["worker-node-2<br/><b>disk-type=ssd</b>"]
+        N2["worker-node-2<br/>disk-type=ssd"]
     end
 
     Pod --> Decision
-    Decision -.->|Loại bỏ (Mismatch)| N1
-    Decision ==>|Khớp nhãn (Scheduled)| N2
+    Decision -.->|Loại bỏ - Mismatch| N1
+    Decision ==>|Khớp nhãn - Scheduled| N2
 {{< /mermaid >}}
 
 ### 2.2. Các lệnh thao tác với Node Label (Hands-on CLI)
@@ -238,16 +238,16 @@ Nếu như **Node Labels** (kết hợp `nodeSelector` / `nodeAffinity`) hoạt 
 flowchart TD
     subgraph Nodes["Cluster Nodes"]
         NormalNode["Worker Node 1<br/>(Không Taint)"]
-        TaintedNode["Worker Node 2<br/><b>Taint: dedicated=gpu:NoSchedule</b>"]
+        TaintedNode["Worker Node 2<br/>Taint: dedicated=gpu:NoSchedule"]
     end
 
     subgraph Pods["Pods đang cần Schedule"]
         PNormal["Pod Web API<br/>(Không có Toleration)"]
-        PGPU["Pod AI Model Training<br/><b>Toleration: dedicated=gpu</b>"]
+        PGPU["Pod AI Model Training<br/>Toleration: dedicated=gpu"]
     end
 
     PNormal -->|Chạy bình thường| NormalNode
-    PNormal -.->|🚫 Bị xua đuổi / Chặn lại| TaintedNode
+    PNormal -.->|Bị xua đuổi - Chặn lại| TaintedNode
 
     PGPU -->|Có vé thông hành| TaintedNode
 {{< /mermaid >}}
@@ -395,12 +395,12 @@ sequenceDiagram
     participant Other as Other Worker Nodes
 
     Note over Admin,Other: Giai đoạn 1: Phong tỏa Node (Cordon)
-    Admin->>API: kubectl cordon <node-name>
+    Admin->>API: kubectl cordon [node-name]
     API->>Node: Đánh dấu spec.unschedulable = true
-    Sched-->>Node: 🚫 Từ chối xếp mọi Pod mới vào node
+    Sched-->>Node: Từ chối xếp mọi Pod mới vào node
 
     Note over Admin,Other: Giai đoạn 2: Di tản an toàn (Drain)
-    Admin->>API: kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
+    Admin->>API: kubectl drain [node-name] --ignore-daemonsets --delete-emptydir-data
     API->>Node: Gửi tín hiệu Eviction API (SIGTERM) tới các Pod
     API->>Other: Controller tạo Pod mới thay thế trên các Node khác
     Node-->>API: Pods kết thúc xử lý (Graceful Termination) hoàn tất
@@ -408,10 +408,10 @@ sequenceDiagram
 
     Note over Admin,Other: Giai đoạn 3: Bảo trì hoặc Xóa bỏ
     alt Trường hợp 1: Bảo trì xong, mở lại Node
-        Admin->>API: kubectl uncordon <node-name>
+        Admin->>API: kubectl uncordon [node-name]
         API->>Node: spec.unschedulable = false (Sẵn sàng nhận Pod)
     else Trường hợp 2: Xóa vĩnh viễn Node
-        Admin->>API: kubectl delete node <node-name>
+        Admin->>API: kubectl delete node [node-name]
         Admin->>Node: Dọn dẹp Kubelet / Reset hệ điều hành
     end
 {{< /mermaid >}}
