@@ -76,16 +76,47 @@ mongodump \
   --gzip
 ```
 
-💡 **Mẹo nâng cao (Lọc dữ liệu bảng khi dump):** Dùng cờ `--query` để chỉ backup các bản ghi thỏa mãn điều kiện (ví dụ chỉ lấy đơn hàng năm 2026):
-```bash
-mongodump \
-  --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
-  --db=ecommerce_db \
-  --collection=orders \
-  --query='{"created_at": {"$gte": {"$date": "2026-01-01T00:00:00Z"}}}' \
-  --archive=/var/backups/mongodb/orders_2026.dump.gz \
-  --gzip
-```
+💡 **Lọc dữ liệu bảng khi dump: `--query` vs `--queryFile`**
+
+Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ lấy đơn hàng năm 2026 hoặc đơn hàng đã hoàn tất có giá trị cao), bạn có 2 giải pháp:
+
+* **Cách 1: Dùng cờ `--query` trực tiếp trên dòng lệnh (Cho câu lọc đơn giản)**
+  ```bash
+  mongodump \
+    --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+    --db=ecommerce_db \
+    --collection=orders \
+    --query='{"status": "COMPLETED"}' \
+    --archive=/var/backups/mongodb/orders_completed.dump.gz \
+    --gzip
+  ```
+
+* **Cách 2: Dùng cờ `--queryFile` (Khuyên dùng cho Production / Câu lọc phức tạp)**
+  > ⚠️ **Tại sao nên dùng `--queryFile` thay vì `--query`?**  
+  > Khi câu truy vấn chứa nhiều điều kiện phức tạp (`$and`, `$or`, regex, so sánh số tiền, hoặc cú pháp Extended JSON như `{"$date": "..."}`, `{"$oid": "..."}`), việc gõ trực tiếp chuỗi JSON vào terminal rất dễ bị lỗi cú pháp do shell (Bash/Zsh) hiểu nhầm dấu `$` thành biến môi trường, hoặc xung đột các dấu nháy đơn `'` và nháy kép `"`. Dùng `--queryFile` giúp tách biệt hoàn toàn logic truy vấn vào file JSON, sạch sẽ, dễ review code và có thể commit vào Git.
+
+  *Bước 1:* Tạo file JSON điều kiện lọc, ví dụ `filter_orders_2026.json`:
+  ```json
+  {
+    "status": "COMPLETED",
+    "total_amount": { "$gte": 500000 },
+    "created_at": {
+      "$gte": { "$date": "2026-01-01T00:00:00Z" },
+      "$lt": { "$date": "2027-01-01T00:00:00Z" }
+    }
+  }
+  ```
+
+  *Bước 2:* Chạy `mongodump` trỏ vào file truy vấn:
+  ```bash
+  mongodump \
+    --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+    --db=ecommerce_db \
+    --collection=orders \
+    --queryFile=/var/backups/mongodb/filter_orders_2026.json \
+    --archive=/var/backups/mongodb/orders_2026.dump.gz \
+    --gzip
+  ```
 
 #### B. Restore riêng 1 Bảng:
 Dùng cờ `--nsInclude` để chỉ định chính xác namespace `database.collection`:
@@ -132,6 +163,16 @@ mongoexport \
   --collection=users \
   --type=json \
   --out=/var/backups/mongodb/users_export.json
+
+# Xuất dữ liệu bảng có lọc theo file query JSON (dùng --queryFile):
+mongoexport \
+  --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+  --db=ecommerce_db \
+  --collection=orders \
+  --queryFile=/var/backups/mongodb/filter_orders_2026.json \
+  --type=csv \
+  --fields="_id,order_code,customer_id,total_amount,status,created_at" \
+  --out=/var/backups/mongodb/orders_vip_2026.csv
 ```
 
 #### B. Nhập dữ liệu từ CSV / JSON vào Bảng:
@@ -148,6 +189,121 @@ mongoimport \
   --file=/var/backups/mongodb/users_export.csv \
   --mode=upsert \
   --upsertFields=email
+```
+
+---
+
+### 2.4. Bài toán thực tế: Nhập lại dữ liệu lọc theo Query vào Database khác (Bỏ qua, Ghi đè hay Hòa trộn?)
+
+Đây là một bài toán **cực kỳ thực tế** và tiềm ẩn nhiều rủi ro trong quá trình vận hành:
+* Bạn export một tập dữ liệu theo query (ví dụ: chỉ xuất đơn hàng tháng 10/2026).
+* Bạn muốn import tập dữ liệu này vào một Database khác (hoặc chính Database hiện tại để cập nhật/sửa lỗi dữ liệu).
+* 🚨 **CẢNH BÁO TỬ HUYỆT:** Trong tình huống này, **TUYỆT ĐỐI KHÔNG ĐƯỢC DÙNG cờ `--drop`**! Nếu dùng `--drop`, `mongorestore` sẽ **XÓA SẠCH TOÀN BỘ** collection đích (bao gồm cả các đơn hàng tháng 1, 2, 3... không liên quan đến query), gây mất mát dữ liệu thảm khốc!
+
+Vậy nếu không dùng `--drop`, hành vi mặc định khi trùng bản ghi (`_id`) là gì? Và làm thế nào để cấu hình: **Bỏ qua (Skip)**, **Ghi đè thay thế (Replace)** hay **Hòa trộn (Merge)**?
+
+---
+
+#### Trường hợp A: Sử dụng `mongoimport` (Dữ liệu CSV / JSON)
+`mongoimport` hỗ trợ sẵn cờ `--mode` với 3 cơ chế xử lý rõ ràng:
+
+1. **`--mode=insert` (Mặc định):**
+   * Chỉ chèn bản ghi mới.
+   * Nếu bản ghi đã tồn tại (trùng khóa `_id` hoặc unique index), nó sẽ **bỏ qua (Skip)** và in cảnh báo duplicate key để tiếp tục nạp các bản ghi tiếp theo.
+
+2. **`--mode=upsert` (Ghi đè / Thay thế toàn bộ Document):**
+   * Đối chiếu theo trường khóa chỉ định trong `--upsertFields` (mặc định là `_id`).
+   * Nếu bản ghi **chưa có**: Chèn mới (Insert).
+   * Nếu bản ghi **đã tồn tại**: **Thay thế (Replace)** toàn bộ document cũ bằng document mới từ file import.
+
+3. **`--mode=merge` (Hòa trộn các trường):**
+   * Nếu bản ghi **đã tồn tại**: Giữ nguyên các trường cũ đang có trong DB, chỉ cập nhật hoặc bổ sung thêm các trường mới có trong file (hoạt động giống toán tử `$set`).
+
+```bash
+# Ví dụ: Import vào database khác (target_db) và REPLACE bản ghi nếu đã tồn tại
+mongoimport \
+  --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+  --db=target_db \
+  --collection=orders \
+  --type=json \
+  --file=/var/backups/mongodb/orders_oct_2026.json \
+  --mode=upsert \
+  --upsertFields=_id
+```
+
+---
+
+#### Trường hợp B: Sử dụng `mongorestore` (Dữ liệu nhị phân BSON)
+Khác với `mongoimport`, công cụ `mongorestore` **không có cờ `--mode=upsert`**. 
+
+* **Hành vi mặc định của `mongorestore` khi KHÔNG dùng `--drop`:**
+  * Nó chỉ thực hiện thao tác `insert`.
+  * Nếu gặp bản ghi đã tồn tại (trùng `_id`), MongoDB sẽ báo lỗi `E11000 duplicate key error` và **mặc định bỏ qua (Skip)** bản ghi đó để tiếp tục nạp các bản ghi chưa có.
+  * *Hệ quả:* Dữ liệu cũ trong database đích **không hề được cập nhật hay thay thế**!
+
+#### 👉 Giải pháp chuẩn Enterprise: Kỹ thuật "Staging Collection + `$merge` Pipeline"
+Để **Replace (Ghi đè)** hoặc **Merge** các bản ghi khi restore từ file dump theo query sang một database khác, các kỹ sư DBA/DevOps sử dụng quy trình chuẩn 2 bước:
+
+{{< mermaid >}}
+flowchart LR
+    Dump["📁 File Dump (Query)"] -->|1. mongorestore vào| Stage["📦 Bảng Tạm (orders_staging)<br/>(Dùng --drop an toàn)"]
+    Stage -->|2. Aggregation $merge| Target["🎯 Bảng Đích (target_db.orders)<br/>whenMatched: 'replace'"]
+    Target -->|3. Dọn dẹp| DropStage["🗑️ db.orders_staging.drop()"]
+{{< /mermaid >}}
+
+##### Bước 1: Restore vào một Collection tạm (Staging) trong Database đích
+Dùng cờ `--nsFrom` và `--nsTo` để chuyển hướng dữ liệu vào bảng tạm `orders_staging`. Vì là bảng tạm, bạn có thể thoải mái dùng `--drop`:
+
+```bash
+mongorestore \
+  --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+  --nsFrom="ecommerce_db.orders" \
+  --nsTo="target_db.orders_staging" \
+  --archive=/var/backups/mongodb/orders_filtered_2026.dump.gz \
+  --gzip \
+  --drop
+```
+
+##### Bước 2: Dùng lệnh `$merge` trong `mongosh` để ghi đè (Replace) sang Bảng chính
+Kết nối vào `target_db` và chạy pipeline aggregation với toán tử `$merge`:
+
+```javascript
+use target_db
+
+db.orders_staging.aggregate([
+  {
+    $merge: {
+      into: "orders",                  // Bảng đích cần cập nhật
+      on: "_id",                       // Khóa so khớp (thường là _id)
+      whenMatched: "replace",          // ⚡ NẾU ĐÃ TỒN TẠI: Ghi đè toàn bộ document!
+      whenNotMatched: "insert"         // ⚡ NẾU CHƯA CÓ: Chèn mới vào
+    }
+  }
+])
+
+// Bước 3: Xóa bảng tạm sau khi đã merge thành công
+db.orders_staging.drop()
+```
+
+##### Bảng tra cứu các chế độ của `whenMatched` trong `$merge`:
+| Giá trị `whenMatched` | Hành vi xử lý khi bản ghi đã tồn tại |
+| :--- | :--- |
+| **`"replace"`** | **Thay thế hoàn toàn** document cũ trong DB đích bằng document từ file restore |
+| **`"merge"`** | **Hòa trộn**: Cập nhật các trường mới, giữ nguyên các trường cũ không bị đè |
+| **`"keepExisting"`** | **Bỏ qua (Skip)**: Giữ nguyên bản ghi hiện tại, không làm gì cả |
+| **`"fail"`** | Dừng pipeline và báo lỗi ngay lập tức nếu phát hiện trùng lặp khóa |
+
+💡 **Khi thực hiện trên Kubernetes qua `/dev/shm`:**
+Bạn chỉ cần nạp file dump vào `/dev/shm` của Pod Primary, chạy `mongorestore` vào `target_db.orders_staging`, rồi gọi `mongosh` thực thi đoạn script `$merge` ở trên thông qua `kubectl exec`:
+```bash
+kubectl exec -n $NAMESPACE $PRIMARY_POD -- mongosh target_db \
+  -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
+  --eval '
+    db.orders_staging.aggregate([{
+      $merge: { into: "orders", on: "_id", whenMatched: "replace", whenNotMatched: "insert" }
+    }]);
+    db.orders_staging.drop();
+  '
 ```
 
 ---
@@ -252,6 +408,36 @@ kubectl exec -n $NAMESPACE $POD_NAME -- \
 
 # 3. Dọn dẹp RAM ngay sau khi import xong
 kubectl exec -n $NAMESPACE $POD_NAME -- rm -f $REMOTE_FILE
+```
+
+#### Dùng `--queryFile` lọc dữ liệu trong Kubernetes Pod qua `/dev/shm`:
+Khi cần dump hoặc export dữ liệu có điều kiện lọc phức tạp trong K8s Pod mà không muốn dính lỗi escape ký tự shell:
+
+```bash
+# Bước 1: Bắn trực tiếp nội dung JSON vào /dev/shm của Pod (không cần tạo file ở local)
+kubectl exec -i -n $NAMESPACE $POD_NAME -- sh -c 'cat > /dev/shm/filter.json' << 'EOF'
+{
+  "status": "COMPLETED",
+  "total_amount": { "$gte": 500000 },
+  "created_at": { "$gte": { "$date": "2026-01-01T00:00:00Z" } }
+}
+EOF
+
+# Bước 2: Chạy mongodump với --queryFile trỏ tới /dev/shm/filter.json
+kubectl exec -n $NAMESPACE $POD_NAME -- \
+  mongodump \
+    -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
+    --db="ecommerce_db" \
+    --collection="orders" \
+    --queryFile=/dev/shm/filter.json \
+    --archive=/dev/shm/orders_vip.dump.gz \
+    --gzip
+
+# Bước 3: Kéo file backup về máy quản trị
+kubectl cp $NAMESPACE/$POD_NAME:/dev/shm/orders_vip.dump.gz ./orders_vip.dump.gz
+
+# Bước 4: Xóa sạch cả file query lẫn file dump trong /dev/shm để giải phóng RAM
+kubectl exec -n $NAMESPACE $POD_NAME -- rm -f /dev/shm/filter.json /dev/shm/orders_vip.dump.gz
 ```
 
 ---
