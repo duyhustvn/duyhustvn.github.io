@@ -11,45 +11,45 @@ series_order: 4
 showTableOfContents: true
 ---
 
-Sao lưu (Backup) và Phục hồi (Restore) dữ liệu là "tấm lưới bảo hiểm" sống còn của bất kỳ hệ thống dữ liệu nào. Nếu việc backup trên máy chủ truyền thống (Bare-metal hoặc Virtual Machine) tương đối thẳng thắn, thì khi bước vào thế giới **Kubernetes**, bạn sẽ gặp phải những rào cản chính sách bảo mật khắt khe: Container non-root, hệ thống tệp gốc ở chế độ chỉ đọc (`readOnlyRootFilesystem: true`), và **dữ liệu chỉ được phép sao chép tạm thời vào phân vùng bộ nhớ chia sẻ `/dev/shm`**.
+Sao lưu (Backup) và Phục hồi (Restore) dữ liệu là "tấm lưới bảo hiểm" sống còn của bất kỳ hệ thống cơ sở dữ liệu nào. Nếu việc backup trên máy chủ truyền thống (Bare-metal hoặc Virtual Machine) tương đối thẳng thắn, thì khi bước vào thế giới **Kubernetes**, bạn sẽ gặp phải những rào cản chính sách bảo mật khắt khe: Container non-root, hệ thống tệp gốc ở chế độ chỉ đọc (`readOnlyRootFilesystem: true`), và **dữ liệu chỉ được phép sao chép tạm thời vào phân vùng bộ nhớ chia sẻ `/dev/shm`**.
 
-Bên cạnh việc sao lưu toàn bộ cơ sở dữ liệu, một nhu cầu cực kỳ phổ biến trong vận hành thực tế là **nhập / xuất dữ liệu theo từng Bảng (Collection) cụ thể** — ví dụ: trích xuất riêng bảng `orders` để phân tích báo cáo, hoặc chỉ restore lại bảng `users` khi xảy ra sự cố xóa nhầm.
+Bên cạnh việc sao lưu toàn bộ cơ sở dữ liệu, một nhu cầu cực kỳ phổ biến trong vận hành thực tế là **nhập / xuất dữ liệu theo từng Bảng (Collection) cụ thể** — ví dụ: trích xuất riêng bảng `orders` để phân tích báo cáo, hoặc chỉ restore lại bảng `users` khi xảy ra sự cố xóa nhầm mà không làm ảnh hưởng đến dữ liệu hiện có.
 
-Bài viết này sẽ hướng dẫn bạn chi tiết từ cấp độ toàn bộ Database đến từng Bảng riêng biệt (cả định dạng BSON chuẩn lẫn CSV/JSON), áp dụng cho môi trường thường và 2 chế độ chạy trên Kubernetes (**Single Node** & **Replica Set**).
+Bài viết này sẽ hướng dẫn bạn chi tiết từ cấp độ toàn bộ Database đến từng Bảng riêng biệt (cả định dạng BSON chuẩn lẫn CSV/JSON), áp dụng từ môi trường truyền thống đến 2 mô hình chạy trên Kubernetes (**Single Node** & **Replica Set**).
 
 ---
 
-## 1. Phân biệt công cụ: `mongodump/mongorestore` vs `mongoexport/mongoimport`
+## 1. Phân Biệt Công Cụ: `mongodump/mongorestore` vs `mongoexport/mongoimport`
 
-Trước khi bắt tay vào thực hành, cần phân biệt rõ 2 bộ công cụ có sẵn trong gói MongoDB Database Tools:
+Trước khi bắt tay vào thực hành, cần phân biệt rõ 2 bộ công cụ có sẵn trong gói **MongoDB Database Tools**:
 
 | Tiêu chí so sánh | `mongodump` / `mongorestore` | `mongoexport` / `mongoimport` |
 | :--- | :--- | :--- |
 | **Định dạng dữ liệu** | **Binary (BSON)** + Metadata JSON | **Plain Text (JSON hoặc CSV)** |
-| **Bảo toàn kiểu dữ liệu** | **100% chính xác** (ObjectId, Date, NumberLong, Binary,...) | Dễ mất mát định dạng chặt chẽ của BSON |
+| **Bảo toàn kiểu dữ liệu** | **100% chính xác** (`ObjectId`, `Date`, `Decimal128`, `Binary`,...) | Dễ mất mát kiểu dữ liệu đặc thù của BSON (đặc biệt khi xuất ra CSV) |
 | **Chỉ số (Indexes)** | **Tự động lưu và khôi phục toàn bộ Index** | **Không** lưu Index (phải tạo lại bằng tay) |
-| **Tốc độ xử lý** | Nhanh hơn gấp nhiều lần (xử lý nhị phân) | Chậm hơn (tốn CPU parse text/json) |
-| **Mục đích sử dụng** | **Backup & Restore hệ thống (Disaster Recovery)** | Export báo cáo ra Excel, ETL sang Data Warehouse |
+| **Tốc độ xử lý** | Nhanh hơn gấp nhiều lần (xử lý nhị phân trực tiếp) | Chậm hơn (tốn CPU parse text/JSON) |
+| **Mục đích sử dụng** | **Backup & Restore hệ thống (Disaster Recovery)** | Xuất báo cáo ra Excel, ETL sang Data Warehouse |
 
-> 💡 **Quy tắc vàng:** Cho mục đích sao lưu thảm họa và phục hồi dữ liệu hệ thống, **luôn luôn dùng `mongodump` và `mongorestore`**. Chỉ dùng `mongoexport`/`mongoimport` khi cần file dạng bảng tính (CSV/JSON) để đọc hoặc trao đổi với hệ thống khác.
+> 💡 **Quy tắc vàng:** Cho mục đích sao lưu thảm họa và phục hồi dữ liệu hệ thống, **luôn luôn dùng `mongodump` và `mongorestore`**. Chỉ dùng `mongoexport` / `mongoimport` khi cần file dạng bảng tính (CSV/JSON) để đọc hoặc trao đổi với hệ thống khác.
 
 ---
 
-## 2. Trường hợp 1: Chạy bình thường (Bare Metal / VM / Docker Host)
+## 2. Môi Trường Truyền Thống (Bare Metal / VM / Docker Host)
 
 ### 2.1. Sao lưu & Phục hồi toàn bộ Database (`mongodump` / `mongorestore`)
 
-Thay vì dump ra hàng ngàn thư mục và file `.bson` rời rạc, hãy sử dụng 2 cờ `--archive` và `--gzip` để gom toàn bộ thành **một file nén duy nhất**:
+Thay vì dump ra hàng ngàn thư mục và file `.bson` rời rạc, hãy sử dụng kết hợp 2 cờ `--archive` và `--gzip` để gom toàn bộ thành **một file nén duy nhất**:
 
 ```bash
-# 1. Backup toàn bộ database ecommerce_db ra 1 file duy nhất
+# 1. Backup toàn bộ database ecommerce_db ra 1 file nén duy nhất
 mongodump \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
   --archive=/var/backups/mongodb/ecommerce_all_$(date +%F).dump.gz \
   --gzip
 
-# 2. Restore toàn bộ database (cờ --drop để xóa bảng cũ trước khi nạp lại)
+# 2. Restore toàn bộ database (cờ --drop để xóa collection cũ trước khi nạp lại)
 mongorestore \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --nsInclude="ecommerce_db.*" \
@@ -60,14 +60,15 @@ mongorestore \
 
 ---
 
-### 2.2. Sao lưu & Phục hồi theo từng BẢNG (Collection) cụ thể dạng BSON
+### 2.2. Sao lưu & Phục hồi theo từng Bảng (Collection) dạng BSON
 
-Khi bạn chỉ muốn sao lưu hoặc khôi phục một bảng duy nhất (giữ nguyên kiểu dữ liệu BSON và toàn bộ Index):
+Khi bạn chỉ muốn sao lưu hoặc khôi phục một bảng duy nhất nhưng vẫn giữ nguyên kiểu dữ liệu BSON và toàn bộ Index:
 
-#### A. Backup riêng 1 Bảng:
-Dùng cờ `--collection` (hoặc `-c`):
+#### A. Backup riêng 1 Bảng (Có hoặc không có điều kiện lọc)
+Dùng cờ `--collection` (hoặc `-c`) để chỉ định bảng cần sao lưu:
+
 ```bash
-# Backup riêng bảng "orders"
+# Backup toàn bộ bảng "orders"
 mongodump \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
@@ -76,11 +77,9 @@ mongodump \
   --gzip
 ```
 
-💡 **Lọc dữ liệu bảng khi dump: `--query` vs `--queryFile`**
+Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ lấy đơn hàng năm 2026 hoặc đơn hàng đã hoàn tất), bạn có thể lọc bằng `--query` hoặc `--queryFile`:
 
-Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ lấy đơn hàng năm 2026 hoặc đơn hàng đã hoàn tất có giá trị cao), bạn có 2 giải pháp:
-
-* **Cách 1: Dùng cờ `--query` trực tiếp trên dòng lệnh (Cho câu lọc đơn giản)**
+- **Cách 1: Dùng `--query` trực tiếp trên dòng lệnh (Cho câu lọc đơn giản)**
   ```bash
   mongodump \
     --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
@@ -91,11 +90,11 @@ Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ 
     --gzip
   ```
 
-* **Cách 2: Dùng cờ `--queryFile` (Khuyên dùng cho Production / Câu lọc phức tạp)**
+- **Cách 2: Dùng `--queryFile` (Khuyên dùng cho Production / Câu lọc phức tạp)**
   > ⚠️ **Tại sao nên dùng `--queryFile` thay vì `--query`?**  
-  > Khi câu truy vấn chứa nhiều điều kiện phức tạp (`$and`, `$or`, regex, so sánh số tiền, hoặc cú pháp Extended JSON như `{"$date": "..."}`, `{"$oid": "..."}`), việc gõ trực tiếp chuỗi JSON vào terminal rất dễ bị lỗi cú pháp do shell (Bash/Zsh) hiểu nhầm dấu `$` thành biến môi trường, hoặc xung đột các dấu nháy đơn `'` và nháy kép `"`. Dùng `--queryFile` giúp tách biệt hoàn toàn logic truy vấn vào file JSON, sạch sẽ, dễ review code và có thể commit vào Git.
+  > Khi câu truy vấn chứa các toán tử như `$and`, `$or`, `$gte` hoặc cú pháp Extended JSON (`{"$date": "..."}`, `{"$oid": "..."}`), việc truyền trực tiếp chuỗi JSON trên terminal rất dễ lỗi do Shell (Bash/Zsh) hiểu nhầm dấu `$` thành biến môi trường hoặc xung đột dấu nháy đơn/kép. Tách truy vấn ra file JSON giúp tránh hoàn toàn lỗi escape ký tự và dễ kiểm soát.
 
-  *Bước 1:* Tạo file JSON điều kiện lọc, ví dụ `filter_orders_2026.json`:
+  *Bước 1:* Tạo file điều kiện lọc `/var/backups/mongodb/filter_orders_2026.json`:
   ```json
   {
     "status": "COMPLETED",
@@ -107,7 +106,7 @@ Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ 
   }
   ```
 
-  *Bước 2:* Chạy `mongodump` trỏ vào file truy vấn:
+  *Bước 2:* Chạy `mongodump` với `--queryFile`:
   ```bash
   mongodump \
     --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
@@ -118,8 +117,9 @@ Khi chỉ muốn backup một tập con bản ghi trong bảng (ví dụ: chỉ 
     --gzip
   ```
 
-#### B. Restore riêng 1 Bảng:
+#### B. Restore riêng 1 Bảng (Và kỹ thuật đổi tên Bảng khi Restore)
 Dùng cờ `--nsInclude` để chỉ định chính xác namespace `database.collection`:
+
 ```bash
 mongorestore \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
@@ -129,25 +129,25 @@ mongorestore \
   --drop
 ```
 
-💡 **Mẹo đổi tên Bảng khi Restore (Table Remapping):** Restore bảng `orders` từ file backup thành một bảng mới tên là `orders_recovered` để kiểm tra trước khi ghi đè bảng chính:
-```bash
-mongorestore \
-  --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
-  --nsFrom="ecommerce_db.orders" \
-  --nsTo="ecommerce_db.orders_recovered" \
-  --archive=/var/backups/mongodb/orders_table_2026-11-07.dump.gz \
-  --gzip
-```
+> 💡 **Mẹo đổi tên Bảng khi Restore (Collection Remapping):** Bạn có thể restore bảng `orders` từ file backup thành một bảng mới tên là `orders_recovered` thông qua cặp cờ `--nsFrom` và `--nsTo` để kiểm tra dữ liệu an toàn trước khi quyết định ghi đè bảng chính:
+> ```bash
+> mongorestore \
+>   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
+>   --nsFrom="ecommerce_db.orders" \
+>   --nsTo="ecommerce_db.orders_recovered" \
+>   --archive=/var/backups/mongodb/orders_table_2026-11-07.dump.gz \
+>   --gzip
+> ```
 
 ---
 
-### 2.3. Xuất & Nhập dữ liệu theo BẢNG dạng CSV / JSON (`mongoexport` / `mongoimport`)
+### 2.3. Xuất & Nhập dữ liệu theo Bảng dạng CSV / JSON (`mongoexport` / `mongoimport`)
 
-Khi bạn cần xuất bảng dữ liệu ra file CSV để mở bằng Excel, Google Sheets hoặc nạp dữ liệu từ file ngoài vào bảng:
+Khi bạn cần xuất bảng dữ liệu ra file CSV để mở bằng Excel, Google Sheets hoặc đồng bộ với hệ thống báo cáo bên ngoài:
 
-#### A. Xuất dữ liệu Bảng ra CSV / JSON:
+#### A. Xuất dữ liệu Bảng ra CSV / JSON
 ```bash
-# Xuất bảng "users" ra định dạng CSV với các cột chỉ định
+# 1. Xuất bảng "users" ra định dạng CSV với các cột chỉ định
 mongoexport \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
@@ -156,7 +156,7 @@ mongoexport \
   --fields="_id,username,email,status,created_at" \
   --out=/var/backups/mongodb/users_export.csv
 
-# Hoặc xuất ra file JSON (1 document trên 1 dòng)
+# 2. Xuất bảng "users" ra định dạng JSON (1 document trên 1 dòng - JSON Lines)
 mongoexport \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
@@ -164,7 +164,7 @@ mongoexport \
   --type=json \
   --out=/var/backups/mongodb/users_export.json
 
-# Xuất dữ liệu bảng có lọc theo file query JSON (dùng --queryFile):
+# 3. Xuất dữ liệu bảng ra CSV có lọc theo file query JSON (--queryFile)
 mongoexport \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
@@ -175,11 +175,11 @@ mongoexport \
   --out=/var/backups/mongodb/orders_vip_2026.csv
 ```
 
-#### B. Nhập dữ liệu từ CSV / JSON vào Bảng:
+#### B. Nhập dữ liệu từ CSV / JSON vào Bảng
 ```bash
 # Nhập file CSV vào bảng "users"
-# --headerline: Dòng đầu tiên của CSV là tiêu đề cột
-# --mode=upsert: Nếu trùng khóa (dựa vào --upsertFields) thì cập nhật, chưa có thì chèn mới
+# --headerline: Lấy dòng đầu tiên của CSV làm tên trường
+# --mode=upsert: Nếu trùng khóa (--upsertFields) thì cập nhật, chưa có thì chèn mới
 mongoimport \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=ecommerce_db \
@@ -193,34 +193,23 @@ mongoimport \
 
 ---
 
-### 2.4. Bài toán thực tế: Nhập lại dữ liệu lọc theo Query vào Database khác (Bỏ qua, Ghi đè hay Hòa trộn?)
+### 2.4. Chiến lược Nhập dữ liệu lọc theo Query mà KHÔNG xóa bảng đích (Skip, Replace, Merge)
 
-Đây là một bài toán **cực kỳ thực tế** và tiềm ẩn nhiều rủi ro trong quá trình vận hành:
-* Bạn export một tập dữ liệu theo query (ví dụ: chỉ xuất đơn hàng tháng 10/2026).
-* Bạn muốn import tập dữ liệu này vào một Database khác (hoặc chính Database hiện tại để cập nhật/sửa lỗi dữ liệu).
-* 🚨 **CẢNH BÁO TỬ HUYỆT:** Trong tình huống này, **TUYỆT ĐỐI KHÔNG ĐƯỢC DÙNG cờ `--drop`**! Nếu dùng `--drop`, `mongorestore` sẽ **XÓA SẠCH TOÀN BỘ** collection đích (bao gồm cả các đơn hàng tháng 1, 2, 3... không liên quan đến query), gây mất mát dữ liệu thảm khốc!
+Trong vận hành thực tế, có một kịch bản rất dễ gây tai nạn:
+- Bạn trích xuất một phần dữ liệu theo query (ví dụ: chỉ xuất đơn hàng tháng 10/2026).
+- Bạn muốn nạp tập dữ liệu này vào một Database khác (hoặc nạp đè lại vào chính Database hiện tại để vá lỗi dữ liệu).
 
-Vậy nếu không dùng `--drop`, hành vi mặc định khi trùng bản ghi (`_id`) là gì? Và làm thế nào để cấu hình: **Bỏ qua (Skip)**, **Ghi đè thay thế (Replace)** hay **Hòa trộn (Merge)**?
+> 🚨 **CẢNH BÁO TỬ HUYỆT:** Khi nạp một bản backup từng phần (partial dump), **TUYỆT ĐỐI KHÔNG DÙNG cờ `--drop`**! Nếu có `--drop`, `mongorestore` sẽ **xóa sạch toàn bộ collection đích** (bay mất cả dữ liệu các tháng 1, 2, 3...) trước khi nạp tập dữ liệu tháng 10 vào!
 
----
+Vậy khi bỏ cờ `--drop`, làm sao kiểm soát hành vi khi trùng khóa `_id`: **Bỏ qua (Skip)**, **Ghi đè (Replace)** hay **Hòa trộn (Merge)**?
 
-#### Trường hợp A: Sử dụng `mongoimport` (Dữ liệu CSV / JSON)
-`mongoimport` hỗ trợ sẵn cờ `--mode` với 3 cơ chế xử lý rõ ràng:
-
-1. **`--mode=insert` (Mặc định):**
-   * Chỉ chèn bản ghi mới.
-   * Nếu bản ghi đã tồn tại (trùng khóa `_id` hoặc unique index), nó sẽ **bỏ qua (Skip)** và in cảnh báo duplicate key để tiếp tục nạp các bản ghi tiếp theo.
-
-2. **`--mode=upsert` (Ghi đè / Thay thế toàn bộ Document):**
-   * Đối chiếu theo trường khóa chỉ định trong `--upsertFields` (mặc định là `_id`).
-   * Nếu bản ghi **chưa có**: Chèn mới (Insert).
-   * Nếu bản ghi **đã tồn tại**: **Thay thế (Replace)** toàn bộ document cũ bằng document mới từ file import.
-
-3. **`--mode=merge` (Hòa trộn các trường):**
-   * Nếu bản ghi **đã tồn tại**: Giữ nguyên các trường cũ đang có trong DB, chỉ cập nhật hoặc bổ sung thêm các trường mới có trong file (hoạt động giống toán tử `$set`).
+#### A. Đối với `mongoimport` (File CSV / JSON) — Dùng cờ `--mode`
+`mongoimport` hỗ trợ trực tiếp 3 chế độ qua cờ `--mode`:
+1. **`--mode=insert` (Mặc định - Skip khi trùng):** Chỉ chèn bản ghi mới. Nếu trùng `_id` (hoặc `--upsertFields`), bỏ qua bản ghi đó và tiếp tục chạy.
+2. **`--mode=upsert` (Replace khi trùng):** Nếu chưa có thì chèn mới; nếu đã tồn tại thì **thay thế toàn bộ document cũ** bằng document từ file import.
+3. **`--mode=merge` (Merge khi trùng):** Nếu đã tồn tại, giữ nguyên các trường cũ trong DB và chỉ cập nhật/bổ sung các trường có trong file import (tương tự `$set`).
 
 ```bash
-# Ví dụ: Import vào database khác (target_db) và REPLACE bản ghi nếu đã tồn tại
 mongoimport \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
   --db=target_db \
@@ -231,29 +220,19 @@ mongoimport \
   --upsertFields=_id
 ```
 
----
+#### B. Đối với `mongorestore` (File BSON) — Kỹ thuật Staging Collection + `$merge`
+Công cụ `mongorestore` **không có cờ `--mode=upsert`**. Khi chạy không có `--drop`, nó chỉ thực hiện `insert` và **mặc định bỏ qua (Skip)** mọi bản ghi bị trùng `_id` (báo `E11000 duplicate key error` rồi đi tiếp), nghĩa là dữ liệu cũ không được cập nhật.
 
-#### Trường hợp B: Sử dụng `mongorestore` (Dữ liệu nhị phân BSON)
-Khác với `mongoimport`, công cụ `mongorestore` **không có cờ `--mode=upsert`**. 
-
-* **Hành vi mặc định của `mongorestore` khi KHÔNG dùng `--drop`:**
-  * Nó chỉ thực hiện thao tác `insert`.
-  * Nếu gặp bản ghi đã tồn tại (trùng `_id`), MongoDB sẽ báo lỗi `E11000 duplicate key error` và **mặc định bỏ qua (Skip)** bản ghi đó để tiếp tục nạp các bản ghi chưa có.
-  * *Hệ quả:* Dữ liệu cũ trong database đích **không hề được cập nhật hay thay thế**!
-
-#### 👉 Giải pháp chuẩn Enterprise: Kỹ thuật "Staging Collection + `$merge` Pipeline"
-Để **Replace (Ghi đè)** hoặc **Merge** các bản ghi khi restore từ file dump theo query sang một database khác, các kỹ sư DBA/DevOps sử dụng quy trình chuẩn 2 bước:
+Để **Replace (Ghi đè)** hoặc **Merge** với file dump BSON chuẩn Enterprise, hãy dùng quy trình **Staging Collection + `$merge` Pipeline**:
 
 {{< mermaid >}}
 flowchart LR
-    Dump["📁 File Dump (Query)"] -->|1. mongorestore vào| Stage["📦 Bảng Tạm (orders_staging)<br/>(Dùng --drop an toàn)"]
-    Stage -->|2. Aggregation $merge| Target["🎯 Bảng Đích (target_db.orders)<br/>whenMatched: 'replace'"]
-    Target -->|3. Dọn dẹp| DropStage["🗑️ db.orders_staging.drop()"]
+    Dump["📁 File Dump (Query)"] -->|"1. mongorestore"| Stage["📦 Bảng Tạm (orders_staging)<br/>(Dùng --drop an toàn)"]
+    Stage -->|"2. Aggregation $merge"| Target["🎯 Bảng Đích (target_db.orders)<br/>whenMatched: 'replace'"]
+    Target -->|"3. Dọn dẹp"| DropStage["🗑️ db.orders_staging.drop()"]
 {{< /mermaid >}}
 
-##### Bước 1: Restore vào một Collection tạm (Staging) trong Database đích
-Dùng cờ `--nsFrom` và `--nsTo` để chuyển hướng dữ liệu vào bảng tạm `orders_staging`. Vì là bảng tạm, bạn có thể thoải mái dùng `--drop`:
-
+**Bước 1:** Restore file dump vào một bảng tạm (`orders_staging`) bằng `--nsFrom` / `--nsTo`:
 ```bash
 mongorestore \
   --uri="mongodb://admin:SecurePass123@127.0.0.1:27017/?authSource=admin" \
@@ -264,56 +243,33 @@ mongorestore \
   --drop
 ```
 
-##### Bước 2: Dùng lệnh `$merge` trong `mongosh` để ghi đè (Replace) sang Bảng chính
-Kết nối vào `target_db` và chạy pipeline aggregation với toán tử `$merge`:
-
+**Bước 2:** Chạy pipeline `$merge` trong `mongosh` để hòa trộn hoặc ghi đè từ bảng tạm sang bảng chính, sau đó xóa bảng tạm:
 ```javascript
 use target_db
 
 db.orders_staging.aggregate([
   {
     $merge: {
-      into: "orders",                  // Bảng đích cần cập nhật
-      on: "_id",                       // Khóa so khớp (thường là _id)
-      whenMatched: "replace",          // ⚡ NẾU ĐÃ TỒN TẠI: Ghi đè toàn bộ document!
-      whenNotMatched: "insert"         // ⚡ NẾU CHƯA CÓ: Chèn mới vào
+      into: "orders",           // Bảng đích cần cập nhật
+      on: "_id",                // Khóa đối chiếu
+      whenMatched: "replace",   // "replace" (Ghi đè) | "merge" (Hòa trộn) | "keepExisting" (Bỏ qua)
+      whenNotMatched: "insert"  // Chèn mới nếu chưa tồn tại
     }
   }
 ])
 
-// Bước 3: Xóa bảng tạm sau khi đã merge thành công
+// Bước 3: Xóa bảng tạm sau khi hoàn tất
 db.orders_staging.drop()
-```
-
-##### Bảng tra cứu các chế độ của `whenMatched` trong `$merge`:
-| Giá trị `whenMatched` | Hành vi xử lý khi bản ghi đã tồn tại |
-| :--- | :--- |
-| **`"replace"`** | **Thay thế hoàn toàn** document cũ trong DB đích bằng document từ file restore |
-| **`"merge"`** | **Hòa trộn**: Cập nhật các trường mới, giữ nguyên các trường cũ không bị đè |
-| **`"keepExisting"`** | **Bỏ qua (Skip)**: Giữ nguyên bản ghi hiện tại, không làm gì cả |
-| **`"fail"`** | Dừng pipeline và báo lỗi ngay lập tức nếu phát hiện trùng lặp khóa |
-
-💡 **Khi thực hiện trên Kubernetes qua `/dev/shm`:**
-Bạn chỉ cần nạp file dump vào `/dev/shm` của Pod Primary, chạy `mongorestore` vào `target_db.orders_staging`, rồi gọi `mongosh` thực thi đoạn script `$merge` ở trên thông qua `kubectl exec`:
-```bash
-kubectl exec -n $NAMESPACE $PRIMARY_POD -- mongosh target_db \
-  -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
-  --eval '
-    db.orders_staging.aggregate([{
-      $merge: { into: "orders", on: "_id", whenMatched: "replace", whenNotMatched: "insert" }
-    }]);
-    db.orders_staging.drop();
-  '
 ```
 
 ---
 
-## 3. Thách Thức Khi Chạy Trên Kubernetes: Ràng Buộc `/dev/shm`
+## 3. Thách Thức Trên Kubernetes: Ràng Buộc Bảo Mật & `/dev/shm`
 
-Trong các cụm Kubernetes đạt chuẩn bảo mật ngân hàng / doanh nghiệp lớn:
-* Container chạy dưới user non-root (`runAsNonRoot: true`).
-* Root Filesystem bị khóa chỉ đọc (`readOnlyRootFilesystem: true`).
-* Thư mục duy nhất có quyền ghi tạm mà không cần mount thêm đĩa cứng chuyên dụng là **/dev/shm** (POSIX Shared Memory).
+Trong các cụm Kubernetes tuân thủ tiêu chuẩn bảo mật doanh nghiệp (Hardened K8s):
+- Container chạy dưới quyền non-root (`runAsNonRoot: true`).
+- Hệ thống tệp gốc bị khóa chỉ đọc (`readOnlyRootFilesystem: true`).
+- Ngoài phân vùng dữ liệu `/data/db`, thư mục khả ghi sẵn có duy nhất trên mọi Linux container mà không cần sửa đổi Pod manifest là **`/dev/shm`** (POSIX Shared Memory - `tmpfs`).
 
 {{< mermaid >}}
 flowchart LR
@@ -328,27 +284,29 @@ flowchart LR
         Engine["⚙️ MongoDB Process (mongod)"]
     end
 
-    BackupFile <-->|kubectl cp| SHM
-    SHM <-->|mongodump / mongoexport<br/>mongorestore / mongoimport| Engine
+    BackupFile <-->|"kubectl cp"| SHM
+    SHM <-->|"mongodump / mongoexport<br/>mongorestore / mongoimport"| Engine
 {{< /mermaid >}}
 
-### ⚠️ Lưu ý sống còn về `/dev/shm`:
-1. **Dung lượng mặc định:** Thường là **64MB** trên Linux container trừ khi Pod spec có mount `emptyDir: { medium: Memory }`.
-2. **Nguy cơ OOMKilled:** Dữ liệu trong `/dev/shm` nằm trực tiếp trên RAM. Nếu bạn dump file lớn vào đây mà quên xóa, Pod sẽ bị tràn RAM và Kubernetes sẽ tiêu diệt Pod ngay lập tức (`OOMKilled`)! **Bắt buộc phải xóa file ngay sau khi xử lý xong.**
+### 3.1. Hai giới hạn sống còn của `/dev/shm` cần nắm rõ
+1. **Giới hạn dung lượng mặc định:** Trên Kubernetes, `/dev/shm` mặc định có kích thước **64MB** (trừ khi Pod được mount một volume `emptyDir` với `medium: Memory`).
+2. **Nguy cơ `OOMKilled`:** Mọi file lưu trong `/dev/shm` đều nằm trực tiếp trên **RAM** và được tính vào `resources.limits.memory` của Pod. Nếu bạn dump file lớn vào `/dev/shm` hoặc quên xóa file sau khi copy xong, Pod sẽ bị tràn RAM và bị Kernel tiêu diệt (`OOMKilled`). **Do đó, bắt buộc phải xóa ngay file tạm trong `/dev/shm` sau mỗi thao tác!**
 
 ---
 
-## 4. Kubernetes Chế Độ 1: Chạy Đơn Node (Single Node)
+## 4. Kịch Bản Kubernetes 1: MongoDB Single Node
 
-Mô hình này thường áp dụng cho môi trường Staging/Dev hoặc các dịch vụ phụ trợ chạy 1 Pod độc lập (ví dụ Pod: `mongodb-single-0`).
+Mô hình này thường dùng cho môi trường Dev/Staging hoặc các dịch vụ phụ trợ chạy 1 Pod độc lập (ví dụ Pod `mongodb-single-0` trong namespace `database`).
 
-### 4.1. Backup & Restore toàn bộ Database qua `/dev/shm`:
+### 4.1. Backup & Restore toàn bộ Database qua `/dev/shm`
+
+#### A. Chiều Backup (Từ Pod về Máy Quản Trị)
 ```bash
 NAMESPACE="database"
 POD_NAME="mongodb-single-0"
 BACKUP_FILE="backup_db_$(date +%Y%m%d_%H%M%S).dump.gz"
 
-# 1. Dump vào /dev/shm của Pod
+# 1. Dump dữ liệu vào /dev/shm của Pod
 kubectl exec -n $NAMESPACE $POD_NAME -- \
   mongodump \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -356,20 +314,45 @@ kubectl exec -n $NAMESPACE $POD_NAME -- \
     --archive=/dev/shm/$BACKUP_FILE \
     --gzip
 
-# 2. Kéo file về máy quản trị
+# 2. Kéo file từ /dev/shm về máy quản trị
 kubectl cp $NAMESPACE/$POD_NAME:/dev/shm/$BACKUP_FILE ./$BACKUP_FILE
 
-# 3. DỌN DẸP NGAY LẬP TỨC để giải phóng RAM của Pod
+# 3. DỌN DẸP NGAY LẬP TỨC để giải phóng RAM cho Pod
 kubectl exec -n $NAMESPACE $POD_NAME -- rm -f /dev/shm/$BACKUP_FILE
 ```
 
-### 4.2. Xuất & Nhập theo từng BẢNG cụ thể qua `/dev/shm`:
+#### B. Chiều Restore (Từ Máy Quản Trị vào Pod)
+```bash
+NAMESPACE="database"
+POD_NAME="mongodb-single-0"
+LOCAL_BACKUP="./backup_db_20261107_120000.dump.gz"
+REMOTE_FILE="/dev/shm/restore_temp.dump.gz"
 
-#### Xuất riêng 1 bảng ra CSV từ Pod qua `/dev/shm`:
+# 1. Đẩy file backup từ máy quản trị vào /dev/shm của Pod
+kubectl cp $LOCAL_BACKUP $NAMESPACE/$POD_NAME:$REMOTE_FILE
+
+# 2. Chạy mongorestore để khôi phục database
+kubectl exec -n $NAMESPACE $POD_NAME -- \
+  mongorestore \
+    -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
+    --nsInclude="ecommerce_db.*" \
+    --archive=$REMOTE_FILE \
+    --gzip \
+    --drop
+
+# 3. Xóa ngay file tạm trong /dev/shm
+kubectl exec -n $NAMESPACE $POD_NAME -- rm -f $REMOTE_FILE
+```
+
+---
+
+### 4.2. Xuất & Nhập theo từng Bảng cụ thể qua `/dev/shm`
+
+#### A. Xuất riêng 1 Bảng ra CSV từ Pod
 ```bash
 CSV_FILE="orders_$(date +%F).csv"
 
-# 1. Chạy mongoexport ghi file vào /dev/shm của Pod
+# 1. Chạy mongoexport ghi file vào /dev/shm
 kubectl exec -n $NAMESPACE $POD_NAME -- \
   mongoexport \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -382,11 +365,11 @@ kubectl exec -n $NAMESPACE $POD_NAME -- \
 # 2. Kéo file CSV về máy quản trị
 kubectl cp $NAMESPACE/$POD_NAME:/dev/shm/$CSV_FILE ./$CSV_FILE
 
-# 3. Xóa file trong /dev/shm
+# 3. Xóa file tạm trong /dev/shm
 kubectl exec -n $NAMESPACE $POD_NAME -- rm -f /dev/shm/$CSV_FILE
 ```
 
-#### Nhập file CSV từ máy quản trị vào một bảng trong Pod qua `/dev/shm`:
+#### B. Nhập file CSV từ máy quản trị vào Bảng trong Pod
 ```bash
 LOCAL_CSV="./import_customers.csv"
 REMOTE_FILE="/dev/shm/customers_temp.csv"
@@ -394,7 +377,7 @@ REMOTE_FILE="/dev/shm/customers_temp.csv"
 # 1. Copy file CSV vào /dev/shm của Pod
 kubectl cp $LOCAL_CSV $NAMESPACE/$POD_NAME:$REMOTE_FILE
 
-# 2. Thực thi mongoimport chèn/cập nhật vào bảng "customers"
+# 2. Thực thi mongoimport với chế độ upsert
 kubectl exec -n $NAMESPACE $POD_NAME -- \
   mongoimport \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -410,11 +393,11 @@ kubectl exec -n $NAMESPACE $POD_NAME -- \
 kubectl exec -n $NAMESPACE $POD_NAME -- rm -f $REMOTE_FILE
 ```
 
-#### Dùng `--queryFile` lọc dữ liệu trong Kubernetes Pod qua `/dev/shm`:
-Khi cần dump hoặc export dữ liệu có điều kiện lọc phức tạp trong K8s Pod mà không muốn dính lỗi escape ký tự shell:
+#### C. Lọc dữ liệu phức tạp với `--queryFile` qua `/dev/shm`
+Để tránh lỗi escape ký tự `$` khi chạy qua hai lớp shell (`kubectl exec` + container shell), hãy tạo trực tiếp file `filter.json` trong `/dev/shm`:
 
 ```bash
-# Bước 1: Bắn trực tiếp nội dung JSON vào /dev/shm của Pod (không cần tạo file ở local)
+# 1. Ghi trực tiếp nội dung JSON vào /dev/shm/filter.json trên Pod
 kubectl exec -i -n $NAMESPACE $POD_NAME -- sh -c 'cat > /dev/shm/filter.json' << 'EOF'
 {
   "status": "COMPLETED",
@@ -423,7 +406,7 @@ kubectl exec -i -n $NAMESPACE $POD_NAME -- sh -c 'cat > /dev/shm/filter.json' <<
 }
 EOF
 
-# Bước 2: Chạy mongodump với --queryFile trỏ tới /dev/shm/filter.json
+# 2. Chạy mongodump với --queryFile
 kubectl exec -n $NAMESPACE $POD_NAME -- \
   mongodump \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -433,18 +416,16 @@ kubectl exec -n $NAMESPACE $POD_NAME -- \
     --archive=/dev/shm/orders_vip.dump.gz \
     --gzip
 
-# Bước 3: Kéo file backup về máy quản trị
+# 3. Kéo file backup về máy quản trị và xóa sạch cả 2 file trong /dev/shm
 kubectl cp $NAMESPACE/$POD_NAME:/dev/shm/orders_vip.dump.gz ./orders_vip.dump.gz
-
-# Bước 4: Xóa sạch cả file query lẫn file dump trong /dev/shm để giải phóng RAM
 kubectl exec -n $NAMESPACE $POD_NAME -- rm -f /dev/shm/filter.json /dev/shm/orders_vip.dump.gz
 ```
 
 ---
 
-## 5. Kubernetes Chế Độ 2: Chạy Replica Set (Cụm HA)
+## 5. Kịch Bản Kubernetes 2: Cụm MongoDB Replica Set (HA)
 
-Khi chạy cụm Replica Set (ví dụ gồm 3 pod: `mongo-0`, `mongo-1`, `mongo-2`):
+Khi vận hành cụm Replica Set gồm 3 Pod (`mongo-0`, `mongo-1`, `mongo-2`) như đã triển khai ở Phần 3, bạn phải tuân thủ quy tắc phân vai giữa **Primary** và **Secondary**:
 
 {{< mermaid >}}
 flowchart TD
@@ -453,25 +434,28 @@ flowchart TD
         Secondary["🔄 SECONDARY NODE<br/>(mongo-1 / mongo-2)<br/>Quyền: READ ONLY"]
     end
 
-    BackupAction["📥 XUẤT / BACKUP TÁC VỤ"] -.->|Nên thực hiện trên| Secondary
-    RestoreAction["📤 NHẬP / RESTORE TÁC VỤ"] ==>|BẮT BUỘC ghi vào| Primary
-    Primary -->|Tự động sync qua Oplog| Secondary
+    BackupAction["📥 TÁC VỤ BACKUP / EXPORT"] -.->|"Nên thực hiện trên"| Secondary
+    RestoreAction["📤 TÁC VỤ RESTORE / IMPORT"] ==>|"BẮT BUỘC ghi vào"| Primary
+    Primary -->|"Tự động đồng bộ qua Oplog"| Secondary
 {{< /mermaid >}}
 
-* 📥 **Nguyên tắc Xuất / Backup:** Nên thực hiện trên node **SECONDARY** để tránh chiếm dụng CPU và I/O của node Primary đang phục vụ khách hàng. Thêm cờ `--oplog` nếu backup toàn bộ cluster.
-* 📤 **Nguyên tắc Nhập / Restore:** **BẮT BUỘC PHẢI THỰC HIỆN TRÊN NODE PRIMARY!** Các node Secondary ở trạng thái chỉ đọc (Read-Only). Mọi dữ liệu nạp vào Primary sẽ tự động được sao chép sang toàn bộ Secondary thông qua Oplog.
+- 📥 **Nguyên tắc Backup / Export:** Thực hiện trên **SECONDARY Pod** để không gây tải CPU và Disk I/O lên Primary Pod đang phục vụ ứng dụng Production.
+- 📤 **Nguyên tắc Restore / Import:** **Bắt buộc thực hiện trên PRIMARY Pod**, vì các node Secondary ở chế độ chỉ đọc (`Read-Only`). Dữ liệu sau khi ghi vào Primary sẽ tự động nhân bản sang các Secondary qua Oplog.
 
 ---
 
-### 5.1. Backup & Restore Replica Set qua `/dev/shm`
+### 5.1. Backup & Restore toàn cụm Replica Set (Có `--oplog`)
 
-#### A. Backup từ Secondary Pod (`mongo-1`):
+> ⚠️ **Lưu ý quan trọng về cờ `--oplog`:**  
+> Cờ `--oplog` (khi `mongodump`) và `--oplogReplay` (khi `mongorestore`) giúp chụp lại cả các thao tác ghi phát sinh trong suốt thời gian lệnh backup đang chạy (Point-in-time consistency). Tuy nhiên, **`--oplog` CHỈ hoạt động khi bạn backup toàn bộ cluster (không truyền `--db` hoặc `--collection`)**. Nếu kết hợp `--oplog` với `--db`, MongoDB sẽ báo lỗi `bad option: --oplog mode only is supported on full dumps`.
+
+#### A. Backup toàn cụm từ Secondary Pod (`mongo-1`)
 ```bash
 NAMESPACE="database"
-TARGET_POD="mongo-1" # Node Secondary
-BACKUP_FILE="rs_backup_$(date +%Y%m%d_%H%M%S).dump.gz"
+TARGET_POD="mongo-1" # Chọn Pod đang là Secondary
+BACKUP_FILE="rs_full_backup_$(date +%Y%m%d_%H%M%S).dump.gz"
 
-# 1. Dump vào /dev/shm của Secondary Pod kèm cờ --oplog
+# 1. Dump toàn cụm vào /dev/shm của Secondary Pod kèm cờ --oplog
 kubectl exec -n $NAMESPACE $TARGET_POD -- \
   mongodump \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -479,23 +463,23 @@ kubectl exec -n $NAMESPACE $TARGET_POD -- \
     --gzip \
     --oplog
 
-# 2. Copy file về máy local
+# 2. Copy file về máy quản trị
 kubectl cp $NAMESPACE/$TARGET_POD:/dev/shm/$BACKUP_FILE ./$BACKUP_FILE
 
-# 3. Dọn dẹp /dev/shm trên Pod
+# 3. Giải phóng /dev/shm trên Secondary Pod
 kubectl exec -n $NAMESPACE $TARGET_POD -- rm -f /dev/shm/$BACKUP_FILE
 ```
 
-#### B. Restore vào Primary Pod:
+#### B. Restore toàn cụm vào Primary Pod
 ```bash
 NAMESPACE="database"
-BACKUP_FILE="./rs_backup_20261107.dump.gz"
+BACKUP_FILE="./rs_full_backup_20261107.dump.gz"
 REMOTE_PATH="/dev/shm/rs_restore.dump.gz"
 
-# 1. Tự động truy vấn tìm tên Pod đang là PRIMARY
+# 1. Tự động truy vấn tìm chính xác tên Pod đang giữ vai trò PRIMARY
 PRIMARY_POD=$(kubectl exec -n $NAMESPACE mongo-0 -- mongosh --quiet \
   -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
-  --eval "db.isMaster().primary.split(':')[0].split('.')[0]")
+  --eval "db.hello().primary.split(':')[0].split('.')[0]" | tr -d '\r\n')
 
 echo "===> Node Primary hiện tại là: $PRIMARY_POD"
 
@@ -511,25 +495,28 @@ kubectl exec -n $NAMESPACE $PRIMARY_POD -- \
     --oplogReplay \
     --drop
 
-# 4. Xóa file khỏi /dev/shm của Primary
+# 4. Xóa file khỏi /dev/shm của Primary Pod
 kubectl exec -n $NAMESPACE $PRIMARY_POD -- rm -f $REMOTE_PATH
 
-# 5. Kiểm tra trạng thái đồng bộ của các node Secondary
-kubectl exec -n $NAMESPACE $PRIMARY_POD -- mongosh \
+# 5. Kiểm tra trạng thái đồng bộ của các thành viên trong Replica Set
+kubectl exec -n $NAMESPACE $PRIMARY_POD -- mongosh --quiet \
   -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
   --eval "rs.status().members.forEach(m => print(m.name + ' --> ' + m.stateStr))"
 ```
 
 ---
 
-### 5.2. Nhập & Xuất theo từng BẢNG cụ thể trên Replica Set qua `/dev/shm`
+### 5.2. Backup & Restore theo từng Bảng trên Replica Set qua `/dev/shm`
 
-#### Xuất riêng 1 Bảng từ Secondary Node (`mongo-1`):
+Khi chỉ sao lưu hoặc khôi phục 1 bảng cụ thể (`--db` + `--collection`), ta **bỏ cờ `--oplog`** nhưng vẫn giữ nguyên nguyên tắc: **Lấy từ Secondary, Nạp vào Primary**.
+
+#### A. Xuất riêng 1 Bảng từ Secondary Pod
 ```bash
+NAMESPACE="database"
 BACKUP_POD="mongo-1"
 TABLE_FILE="orders_table.dump.gz"
 
-# Dump riêng bảng "orders" vào /dev/shm của Secondary
+# 1. Dump riêng bảng "orders" vào /dev/shm của Secondary
 kubectl exec -n $NAMESPACE $BACKUP_POD -- \
   mongodump \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -538,22 +525,22 @@ kubectl exec -n $NAMESPACE $BACKUP_POD -- \
     --archive=/dev/shm/$TABLE_FILE \
     --gzip
 
-# Copy về máy và dọn dẹp
+# 2. Kéo về máy quản trị và dọn dẹp /dev/shm
 kubectl cp $NAMESPACE/$BACKUP_POD:/dev/shm/$TABLE_FILE ./$TABLE_FILE
 kubectl exec -n $NAMESPACE $BACKUP_POD -- rm -f /dev/shm/$TABLE_FILE
 ```
 
-#### Nhập lại riêng Bảng đó vào Primary Node:
+#### B. Khôi phục riêng Bảng đó vào Primary Pod (Hoặc dùng Staging + `$merge`)
 ```bash
-# 1. Tự động lấy Primary Pod
+# 1. Tự động xác định Primary Pod
 PRIMARY_POD=$(kubectl exec -n $NAMESPACE mongo-0 -- mongosh --quiet \
   -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
-  --eval "db.isMaster().primary.split(':')[0].split('.')[0]")
+  --eval "db.hello().primary.split(':')[0].split('.')[0]" | tr -d '\r\n')
 
-# 2. Copy vào /dev/shm của PRIMARY
+# 2. Copy file vào /dev/shm của PRIMARY Pod
 kubectl cp ./$TABLE_FILE $NAMESPACE/$PRIMARY_POD:/dev/shm/$TABLE_FILE
 
-# 3. Restore riêng bảng orders với cờ --drop
+# 3. Trường hợp muốn thay thế toàn bộ bảng orders:
 kubectl exec -n $NAMESPACE $PRIMARY_POD -- \
   mongorestore \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -562,30 +549,45 @@ kubectl exec -n $NAMESPACE $PRIMARY_POD -- \
     --gzip \
     --drop
 
-# 4. Xóa file trên Primary
+# 4. Dọn dẹp file tạm trên Primary Pod
 kubectl exec -n $NAMESPACE $PRIMARY_POD -- rm -f /dev/shm/$TABLE_FILE
 ```
 
+> 💡 **Nếu muốn Merge/Replace bản dump theo Query trên K8s mà KHÔNG dùng `--drop`:**  
+> Thay bước 3 ở trên bằng lệnh restore vào bảng tạm `--nsFrom="ecommerce_db.orders" --nsTo="target_db.orders_staging" --drop`, sau đó chạy `$merge` trực tiếp từ xa:
+> ```bash
+> kubectl exec -n $NAMESPACE $PRIMARY_POD -- mongosh target_db --quiet \
+>   -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
+>   --eval '
+>     db.orders_staging.aggregate([{
+>       $merge: { into: "orders", on: "_id", whenMatched: "replace", whenNotMatched: "insert" }
+>     }]);
+>     db.orders_staging.drop();
+>   '
+> ```
+
 ---
 
-## 6. Pro-Tip: Kỹ Thuật Streaming Pipe (Bypass hoàn toàn giới hạn `/dev/shm`)
+## 6. Kỹ Thuật Nâng Cao: UNIX Pipe Streaming (Vượt Giới Hạn RAM `/dev/shm`)
 
-Trong thực tế, file backup của bảng hoặc database có thể nặng **50GB hoặc 100GB**, trong khi `/dev/shm` chỉ có vài trăm MB RAM. Nếu lưu file tạm vào `/dev/shm`, Pod chắc chắn sẽ chết vì OOM.
+Nếu database hoặc bảng của bạn nặng **50GB – 100GB**, trong khi `/dev/shm` chỉ có 64MB hoặc vài trăm MB RAM, việc lưu file tạm vào `/dev/shm` chắc chắn sẽ làm Pod bị `OOMKilled`.
 
-Bạn hoàn toàn có thể **bỏ qua việc lưu file vào `/dev/shm`** bằng cách dùng ống dẫn dữ liệu (UNIX Pipe) trực tiếp qua `kubectl exec`:
+Giải pháp triệt để là sử dụng **UNIX Pipe Streaming** qua `kubectl exec -i`: Dữ liệu được truyền thẳng từ `stdout`/`stdin` của tiến trình `mongodump`/`mongorestore` qua đường truyền mạng về đĩa cứng của máy quản trị, **không tốn 1 byte dung lượng nào trong `/dev/shm` hay ổ đĩa của Pod**.
 
-### Backup toàn bộ DB dạng Stream (Không tốn 1 byte đĩa hay RAM trong Pod):
+### 6.1. Backup toàn bộ Database dạng Stream trực tiếp
 ```bash
+# Không truyền tên file sau cờ --archive để mongodump đẩy luồng dữ liệu ra stdout
 kubectl exec -i -n database mongo-1 -- \
   mongodump \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
     --archive \
-    --gzip > ./backup_direct_stream.dump.gz
+    --gzip \
+    --oplog > ./backup_direct_stream.dump.gz
 ```
-*(Dữ liệu từ stdout của container được bắn thẳng qua mạng và ghi trực tiếp vào ổ cứng máy host).*
 
-### Xuất 1 BẢNG ra file CSV dạng Stream trực tiếp:
+### 6.2. Xuất 1 Bảng ra CSV dạng Stream trực tiếp
 ```bash
+# Khi không có cờ --out, mongoexport sẽ in kết quả CSV thẳng ra stdout
 kubectl exec -i -n database mongo-1 -- \
   mongoexport \
     -u "admin" -p "SecurePass123" --authenticationDatabase "admin" \
@@ -595,7 +597,7 @@ kubectl exec -i -n database mongo-1 -- \
     --fields="_id,order_code,total_amount,status" > ./orders_stream.csv
 ```
 
-### Restore 1 BẢNG dạng Stream (Đẩy trực tiếp từ máy host vào Pod Primary):
+### 6.3. Restore 1 Bảng dạng Stream trực tiếp vào Primary Pod
 ```bash
 cat ./orders_table.dump.gz | kubectl exec -i -n database $PRIMARY_POD -- \
   mongorestore \
@@ -608,9 +610,11 @@ cat ./orders_table.dump.gz | kubectl exec -i -n database $PRIMARY_POD -- \
 
 ---
 
-## 7. Script Tự Động Hóa Sản Xuất (Có Trap Cleanup An Toàn)
+## 7. Script Tự Động Hóa Backup Trên Production (Kèm `trap` Dọn Dẹp An Toàn)
 
-Hãy lưu script này lại để dùng cho các tác vụ CronJob hoặc pipeline CI/CD:
+Khi viết script cho CronJob hoặc CI/CD sử dụng `/dev/shm`, rủi ro lớn nhất là script bị ngắt giữa chừng (do rớt mạng hoặc nhấn `Ctrl+C`) khiến file rác vẫn nằm lại trong `/dev/shm` gây nghẽn RAM của Pod.
+
+Script chuẩn Production dưới đây tự động tìm node Secondary để giảm tải cho Primary và sử dụng cơ chế **`trap cleanup EXIT INT TERM`** để cam kết 100% file tạm trong `/dev/shm` luôn được dọn sạch:
 
 ```bash
 #!/usr/bin/env bash
@@ -619,24 +623,24 @@ set -eo pipefail
 NAMESPACE="database"
 STS_NAME="mongo"
 DB_NAME="ecommerce_db"
-COLLECTION_NAME="orders" # Để trống nếu muốn backup cả DB
+COLLECTION_NAME="orders" # Để trống ("") nếu muốn backup toàn bộ DB
 MONGO_USER="admin"
 MONGO_PASS="SecurePass123"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 if [ -n "$COLLECTION_NAME" ]; then
   BACKUP_NAME="backup_${DB_NAME}_${COLLECTION_NAME}_${TIMESTAMP}.dump.gz"
-  EXTRA_ARGS="--collection=${COLLECTION_NAME}"
+  EXTRA_ARGS=(--collection="$COLLECTION_NAME")
 else
   BACKUP_NAME="backup_${DB_NAME}_all_${TIMESTAMP}.dump.gz"
-  EXTRA_ARGS=""
+  EXTRA_ARGS=()
 fi
 
 REMOTE_PATH="/dev/shm/${BACKUP_NAME}"
 LOCAL_DEST="./backups/${BACKUP_NAME}"
 
 echo "=== [1/4] Nhận diện Node Secondary để sao lưu ==="
-TARGET_POD=$(kubectl exec -n $NAMESPACE ${STS_NAME}-0 -- mongosh --quiet \
+TARGET_POD=$(kubectl exec -n "$NAMESPACE" "${STS_NAME}-0" -- mongosh --quiet \
   -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "admin" \
   --eval "
     const status = rs.status();
@@ -646,22 +650,22 @@ TARGET_POD=$(kubectl exec -n $NAMESPACE ${STS_NAME}-0 -- mongosh --quiet \
       const sec = status.members.find(m => m.stateStr === 'SECONDARY');
       print(sec ? sec.name.split(':')[0].split('.')[0] : '${STS_NAME}-0');
     }
-  ")
+  " | tr -d '\r\n')
 echo "--> Pod được chọn: $TARGET_POD"
 
-# Bẫy lỗi: Đảm bảo dù lệnh có bị ngắt (Ctrl+C hoặc lỗi), file trong /dev/shm VẪN BỊ XÓA
+# Bẫy sự kiện: Đảm bảo dù script thành công, lỗi hay bị Ctrl+C thì /dev/shm vẫn được dọn sạch
 cleanup() {
   echo "=== [CLEANUP] Thu hồi RAM: Xóa file tạm trong /dev/shm trên $TARGET_POD ==="
-  kubectl exec -n $NAMESPACE "$TARGET_POD" -- rm -f "$REMOTE_PATH" 2>/dev/null || true
+  kubectl exec -n "$NAMESPACE" "$TARGET_POD" -- rm -f "$REMOTE_PATH" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 echo "=== [2/4] Thực hiện mongodump vào /dev/shm ==="
-kubectl exec -n $NAMESPACE "$TARGET_POD" -- \
+kubectl exec -n "$NAMESPACE" "$TARGET_POD" -- \
   mongodump \
     -u "$MONGO_USER" -p "$MONGO_PASS" --authenticationDatabase "admin" \
     --db="$DB_NAME" \
-    $EXTRA_ARGS \
+    "${EXTRA_ARGS[@]}" \
     --archive="$REMOTE_PATH" \
     --gzip
 
@@ -675,12 +679,24 @@ echo "=== [4/4] Hoàn tất sao lưu an toàn! ==="
 
 ---
 
-## Tóm tắt & Bước đệm sang Bài 5
+## 8. Bảng Tra Cứu Nhanh: Khi Nào Dùng Giải Pháp Nào?
 
-* Luôn ưu tiên `mongodump/mongorestore` cho công tác Disaster Recovery (giữ nguyên BSON & Index). Dùng `mongoexport/mongoimport` khi cần xử lý dữ liệu bảng tính CSV/JSON.
-* Thao tác theo từng bảng: Dùng cờ `--collection` khi dump, `--nsInclude` khi restore, `--query` để lọc dữ liệu, và `--nsFrom` / `--nsTo` khi cần đổi tên bảng.
-* Thư mục `/dev/shm` là cứu cánh khi Pod bị cấm ghi rootfs, nhưng phải dọn dẹp ngay sau khi dùng bằng lệnh `trap`.
-* Khi vận hành Replica Set: **Xuất/Dump từ Secondary, Nhập/Restore vào Primary**.
-* Sử dụng kỹ thuật **UNIX Pipe Streaming** để xử lý các bảng hoặc database dung lượng lớn mà không sợ tràn RAM `/dev/shm`.
+| Tình huống thực tế | Công cụ & Cờ khuyên dùng | Phương thức trên Kubernetes |
+| :--- | :--- | :--- |
+| **Backup toàn cụm Replica Set (Point-in-time)** | `mongodump --archive --gzip --oplog` | Chạy trên **Secondary Pod** (qua Streaming Pipe nếu DB > 50MB) |
+| **Backup / Restore 1 bảng nhỏ (< 50MB)** | `mongodump -d <db> -c <col>` / `mongorestore --nsInclude` | Qua `/dev/shm` + `kubectl cp` + `rm -f` ngay sau khi xong |
+| **Backup / Restore DB lớn (hàng chục GB)** | `mongodump --archive --gzip` | Dùng **UNIX Pipe Streaming** (`kubectl exec -i ... > file.dump.gz`) |
+| **Lọc dữ liệu theo điều kiện phức tạp (`$date`, `$gte`)** | `mongodump` / `mongoexport` kèm `--queryFile` | Tạo file `filter.json` trong `/dev/shm` để tránh lỗi escape ký tự `$` |
+| **Nạp bản dump BSON theo Query (Không xóa dữ liệu cũ)** | `mongorestore --nsFrom --nsTo` + Aggregation `$merge` | Restore vào bảng `*_staging` trên **Primary Pod**, chạy `$merge` rồi drop bảng tạm |
+| **Xuất báo cáo cho Excel / BI hoặc Upsert từ CSV** | `mongoexport --type=csv` / `mongoimport --mode=upsert` | Xuất từ **Secondary Pod**, nhập vào **Primary Pod** |
 
-👉 **Ở bài viết cuối cùng (Bài 5):** Chúng ta sẽ khép lại toàn bộ series với chủ đề nâng cao: **"Giám Sát, Bảo Mật & Disaster Recovery Nâng Cao"** — Triển khai Prometheus mongodb-exporter, mã hóa TLS/mTLS, NetworkPolicy và kỹ thuật chụp CSI Volume Snapshot trong tích tắc.
+---
+
+## Tổng Kết & Bước Đệm Sang Phần 5
+
+- Luôn ưu tiên **`mongodump` / `mongorestore`** cho công tác Disaster Recovery để bảo toàn 100% kiểu dữ liệu BSON và Indexes. Chỉ dùng **`mongoexport` / `mongoimport`** khi cần làm việc với CSV/JSON.
+- Khi thao tác với dữ liệu lọc theo query, **tuyệt đối không dùng `--drop`** trực tiếp lên bảng chính; hãy sử dụng kỹ thuật **Staging Collection + `$merge`**.
+- Trên Kubernetes có bật `readOnlyRootFilesystem: true`, **`/dev/shm`** là vùng nhớ tạm tiện lợi nhưng luôn phải đi kèm cơ chế xóa file (`trap`) hoặc chuyển sang **UNIX Pipe Streaming** với dữ liệu lớn để tránh `OOMKilled`.
+- Nguyên tắc bất di bất dịch trên Replica Set: **Xuất từ Secondary, Nhập vào Primary**.
+
+👉 **Đón đọc bài cuối cùng (Phần 5):** [**Giám Sát, Bảo Mật & Disaster Recovery Nâng Cao**](/posts/mongodb-part5-monitoring-security-disaster-recovery/) — Triển khai Prometheus `mongodb-exporter`, mã hóa đường truyền TLS/mTLS, cô lập mạng với `NetworkPolicy` và kỹ thuật chụp CSI Volume Snapshot cho dữ liệu hàng Terabytes trong tích tắc.
